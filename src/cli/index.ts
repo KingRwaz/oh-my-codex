@@ -709,6 +709,31 @@ function isCodexSqliteArtifact(entryName: string): boolean {
   return /^(?:state|logs)_\d+\.sqlite(?:-(?:shm|wal))?$/.test(entryName);
 }
 
+const PROJECT_LAUNCH_PERSISTED_RUNTIME_ENTRY_NAMES = new Set([
+  // Codex CLI writes browser/OTP login state here when CODEX_HOME points at
+  // the per-session mirror. Persist only the opaque file itself; never parse or
+  // log the contents.
+  "auth.json",
+]);
+
+function shouldPersistProjectLaunchRuntimeEntry(entryName: string): boolean {
+  return PROJECT_LAUNCH_PERSISTED_RUNTIME_ENTRY_NAMES.has(entryName);
+}
+
+export async function persistProjectLaunchRuntimeAuthState(
+  runtimeCodexHome: string | undefined,
+  projectCodexHome: string | undefined,
+): Promise<void> {
+  if (!runtimeCodexHome || !projectCodexHome) return;
+  if (!existsSync(runtimeCodexHome)) return;
+  await mkdir(projectCodexHome, { recursive: true });
+
+  for (const entry of await readdir(runtimeCodexHome, { withFileTypes: true })) {
+    if (!shouldPersistProjectLaunchRuntimeEntry(entry.name) || !entry.isFile()) continue;
+    await copyFile(join(runtimeCodexHome, entry.name), join(projectCodexHome, entry.name));
+  }
+}
+
 /**
  * Project-scope setup keeps durable Codex config under <repo>/.codex, but the
  * Codex TUI also stores model-availability NUX counters in CODEX_HOME/config.toml.
@@ -792,8 +817,15 @@ export async function prepareCodexHomeForLaunch(
   };
 }
 
-async function cleanupRuntimeCodexHome(runtimeCodexHomeForCleanup?: string): Promise<void> {
+async function cleanupRuntimeCodexHome(
+  runtimeCodexHomeForCleanup?: string,
+  projectCodexHomeForPersistence?: string,
+): Promise<void> {
   if (!runtimeCodexHomeForCleanup) return;
+  await persistProjectLaunchRuntimeAuthState(
+    runtimeCodexHomeForCleanup,
+    projectCodexHomeForPersistence,
+  );
   await rm(runtimeCodexHomeForCleanup, { recursive: true, force: true });
 }
 
@@ -1678,7 +1710,7 @@ export async function launchWithHud(args: string[]): Promise<void> {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
     if (!postLaunchHandledExternally) {
       await postLaunch(cwd, sessionId, codexHomeOverride, enableNotifyFallbackAuthority, projectLocalCodexHomeForCleanup);
-      await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
+      await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup, projectLocalCodexHomeForCleanup).catch(logCliOperationFailure);
     }
   }
 }
@@ -1792,7 +1824,7 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     runCodexBlocking(cwd, codexArgs, codexEnv);
   } finally {
     await postLaunch(cwd, sessionId, codexHomeOverride, true, projectLocalCodexHomeForCleanup);
-    await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
+    await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup, projectLocalCodexHomeForCleanup).catch(logCliOperationFailure);
   }
 }
 
@@ -4137,7 +4169,7 @@ export async function runDetachedSessionPostLaunch(
     false,
     projectLocalCodexHomeForCleanup,
   );
-  await cleanupRuntimeCodexHome(runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
+  await cleanupRuntimeCodexHome(runtimeCodexHomeForCleanup, projectLocalCodexHomeForCleanup).catch(logCliOperationFailure);
 }
 
 async function emitNativeHookEvent(

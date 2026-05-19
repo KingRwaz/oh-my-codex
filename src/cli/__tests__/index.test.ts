@@ -45,6 +45,7 @@ import {
   resolveOmxRootForLaunch,
   resolveDisposableWorktreeOmxRootForLaunch,
   prepareCodexHomeForLaunch,
+  persistProjectLaunchRuntimeAuthState,
   runtimeCodexHomePath,
   buildDetachedSessionBootstrapSteps,
   buildDetachedTmuxSessionName,
@@ -1999,6 +2000,36 @@ describe("project launch scope helpers", () => {
       await prepareCodexHomeForLaunch(wd, "session-2033-repeat", {});
       assert.equal(await readFile(configPath, "utf-8"), originalConfig);
       assert.equal((await stat(configPath)).mtimeMs, beforeStat.mtimeMs);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("persists project-scope Codex auth written into the runtime CODEX_HOME mirror", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-launch-runtime-auth-home-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await mkdir(projectCodexHome, { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+      await writeFile(join(projectCodexHome, "config.toml"), 'model = "gpt-5.5"\n');
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-auth", {});
+      const runtimeCodexHome = runtimeCodexHomePath(wd, "session-auth");
+      const opaqueAuthState = JSON.stringify({ token: "opaque-test-token" });
+      await writeFile(join(runtimeCodexHome, "auth.json"), opaqueAuthState);
+      await writeFile(join(runtimeCodexHome, "config.toml"), 'model = "gpt-5.5"\n[tui.model_availability_nux]\n"gpt-5.5" = 1\n');
+
+      await persistProjectLaunchRuntimeAuthState(
+        prepared.runtimeCodexHomeForCleanup,
+        prepared.projectLocalCodexHomeForCleanup,
+      );
+
+      assert.equal(await readFile(join(projectCodexHome, "auth.json"), "utf-8"), opaqueAuthState);
+      assert.equal(await readFile(join(projectCodexHome, "config.toml"), "utf-8"), 'model = "gpt-5.5"\n');
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
