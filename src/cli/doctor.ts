@@ -1076,9 +1076,10 @@ function configHasOmxEntries(configContent: string): boolean {
 function configEnablesPluginScopedHooks(configContent: string): boolean {
 	try {
 		const parsed = parseToml(configContent) as {
+			plugin_hooks?: unknown;
 			features?: Record<string, unknown>;
 		};
-		return isEnabledTomlValue(parsed.features?.plugin_hooks);
+		return isEnabledTomlValue(parsed.plugin_hooks) || isEnabledTomlValue(parsed.features?.plugin_hooks);
 	} catch {
 		return /^\s*plugin_hooks\s*=\s*(?:true|1|"true"|"1"|"yes"|"on")\s*$/m.test(configContent);
 	}

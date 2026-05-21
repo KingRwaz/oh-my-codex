@@ -795,7 +795,6 @@ OMX_LORE_COMMIT_GUARD = "truee"
 			await writeFile(
 				join(codexDir, "config.toml"),
 				[
-					"[features]",
 					"plugin_hooks = true",
 					"goals = true",
 					"",
