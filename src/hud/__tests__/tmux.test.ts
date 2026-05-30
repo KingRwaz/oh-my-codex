@@ -11,6 +11,7 @@ import {
   hudPaneMatchesOwner,
   listCurrentWindowHudPaneIds,
   OMX_TMUX_HUD_LEADER_PANE_ENV,
+  TMUX_PANE_FIELD_SEPARATOR_OCTAL_ESCAPE,
   parseTmuxPaneSnapshot,
   readActiveTmuxPaneId,
   readHudPaneOwner,
@@ -147,6 +148,41 @@ describe('HUD pane ownership helpers', () => {
       sessionId: 'sess-a',
       leaderPaneId: '%1',
     });
+  });
+
+  it('splits tmux octal-escaped control separators from live list-panes output', () => {
+    const escapedSeparator = TMUX_PANE_FIELD_SEPARATOR_OCTAL_ESCAPE;
+    const panes = parseTmuxPaneSnapshot(
+      [
+        ['%140', 'node', '', '/home/tools/oh-my-codex'].join(escapedSeparator),
+        [
+          '%202',
+          'node',
+          `"exec env OMX_SESSION_ID='sess-a' OMX_TMUX_HUD_OWNER='1' ${OMX_TMUX_HUD_LEADER_PANE_ENV}='%140' OMX_ROOT='/tmp/run' '/usr/bin/node' '/repo/dist/cli/omx.js' hud --watch --preset=focused"`,
+          '/home/tools/oh-my-codex.omx-worktrees/launch-fix-default-subagent-fix',
+        ].join(escapedSeparator),
+      ].join('\n'),
+    );
+
+    assert.equal(panes.length, 2);
+    assert.equal(panes[0]?.paneId, '%140');
+    assert.equal(panes[0]?.currentCommand, 'node');
+    assert.equal(panes[0]?.startCommand, '');
+    assert.equal(panes[0]?.currentPath, '/home/tools/oh-my-codex');
+    assert.equal(panes[1]?.paneId, '%202');
+    assert.equal(panes[1]?.currentCommand, 'node');
+    assert.equal(
+      panes[1]?.currentPath,
+      '/home/tools/oh-my-codex.omx-worktrees/launch-fix-default-subagent-fix',
+    );
+    assert.deepEqual(readHudPaneOwner(panes[1]!), {
+      sessionId: 'sess-a',
+      leaderPaneId: '%140',
+    });
+    assert.deepEqual(
+      findHudWatchPaneIds(panes, '%140', { sessionId: 'sess-a', leaderPaneId: '%140' }),
+      ['%202'],
+    );
   });
 
   it('preserves tab-containing start commands when reading the optional cwd column', () => {
