@@ -38,8 +38,6 @@ jobs:
           node -e "const p=require('./package.json'); if (p.version !== process.env.EXPECTED_VERSION) { console.error(p.version); process.exit(1); }"
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
-      - name: Install dependencies for prepack
-        run: npm ci
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
