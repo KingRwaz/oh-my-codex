@@ -10,6 +10,8 @@ export interface CodexGoalSnapshot {
   status?: CodexGoalSnapshotStatus;
   tokenBudget?: number;
   remainingTokens?: number | null;
+  unavailableReason?: 'db_schema_context_error' | 'tool_error';
+  errorMessage?: string;
   raw: unknown;
 }
 
@@ -55,10 +57,53 @@ function normalizeObjective(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+function extractErrorMessage(value: unknown): string {
+  const root = safeObject(value);
+  const candidates = [
+    root.error,
+    root.message,
+    root.errorMessage,
+    root.stderr,
+    safeObject(root.error).message,
+    safeObject(root.error).error,
+  ];
+  return candidates.map(safeString).find(Boolean) ?? '';
+}
+
+export function isCodexGoalDbSchemaContextError(message: string | undefined): boolean {
+  const normalized = safeString(message).toLowerCase();
+  return Boolean(normalized)
+    && (
+      normalized.includes('no such table: thread_goals')
+      || (normalized.includes('thread_goals') && /\b(?:sqlite|sql|schema|table|database|db)\b/.test(normalized))
+      || /\b(?:codex goal|goal)\b.*\b(?:db|database|schema|context)\b.*\b(?:unavailable|missing|failed|error)\b/.test(normalized)
+    );
+}
+
 export function parseCodexGoalSnapshot(value: unknown): CodexGoalSnapshot {
   const root = safeObject(value);
-  const goalValue = Object.hasOwn(root, 'goal') ? root.goal : value;
+  const hasGoalProperty = Object.hasOwn(root, 'goal');
+  const goalValue = hasGoalProperty ? root.goal : value;
+  const errorMessage = hasGoalProperty && goalValue !== null && goalValue !== undefined && goalValue !== false
+    ? ''
+    : extractErrorMessage(value);
+  if (!hasGoalProperty && errorMessage) {
+    return {
+      available: false,
+      unavailableReason: isCodexGoalDbSchemaContextError(errorMessage) ? 'db_schema_context_error' : 'tool_error',
+      errorMessage,
+      raw: value,
+    };
+  }
   if (goalValue === null || goalValue === undefined || goalValue === false) {
+    if (errorMessage) {
+      return {
+        available: false,
+        unavailableReason: isCodexGoalDbSchemaContextError(errorMessage) ? 'db_schema_context_error' : 'tool_error',
+        errorMessage,
+        raw: value,
+      };
+    }
     return { available: false, raw: value };
   }
 
@@ -115,7 +160,11 @@ export function reconcileCodexGoalSnapshot(
   const warnings: string[] = [];
 
   if (!effectiveSnapshot.available) {
-    const message = 'Codex goal snapshot is absent or reports no active goal; call get_goal and pass its JSON with --codex-goal-json.';
+    const detail = effectiveSnapshot.errorMessage ? ` Last get_goal error: ${effectiveSnapshot.errorMessage}.` : '';
+    const diagnostic = effectiveSnapshot.unavailableReason === 'db_schema_context_error'
+      ? ' Codex goal state is unavailable due to a DB/schema/context error; this is distinct from a normal missing or incomplete goal.'
+      : '';
+    const message = `Codex goal snapshot is absent or reports no active goal; call get_goal and pass its JSON with --codex-goal-json.${diagnostic}${detail}`;
     if (options.requireSnapshot) errors.push(message);
     else warnings.push(message);
     return { ok: errors.length === 0, snapshot: effectiveSnapshot, warnings, errors };
@@ -148,4 +197,16 @@ export function reconcileCodexGoalSnapshot(
 export function formatCodexGoalReconciliation(reconciliation: CodexGoalReconciliation): string {
   const parts = [...reconciliation.errors, ...reconciliation.warnings];
   return parts.join(' ');
+}
+
+export function buildCodexGoalTerminalCleanupNotice(workflowLabel: string): string {
+  return [
+    `${workflowLabel}: Codex goal is complete and OMX durable workflow artifacts are complete.`,
+    'Terminal next step for another goal in this same Codex thread/session: run /goal clear in the Codex UI before calling create_goal for the next OMX goal.',
+    'OMX shell commands and hooks do not call /goal clear or hidden thread/goal/clear routes; if a future Codex tool surface exposes explicit clear/reset, use that tool instead.',
+  ].join('\n');
+}
+
+export function buildCompletedCodexGoalRemediation(workflowLabel: string): string {
+  return `${workflowLabel}: get_goal reports a completed Codex goal still attached to this thread. Run /goal clear in the Codex UI before starting another goal in this same thread/session; OMX did not and cannot clear hidden Codex goal state from shell/hooks.`;
 }

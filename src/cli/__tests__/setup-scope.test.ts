@@ -233,7 +233,7 @@ describe("omx setup scope behavior", () => {
       assert.match(configToml, /^max_depth = 2$/m);
       assert.doesNotMatch(configToml, /^\[env\]$/m);
       assert.match(configToml, /^\[shell_environment_policy\.set\]$/m);
-      assert.match(configToml, /^USE_OMX_EXPLORE_CMD = "1"$/m);
+      assert.match(configToml, /^USE_OMX_EXPLORE_CMD = "0"$/m);
       assert.match(configToml, /^hooks = true$/m);
       assert.match(configToml, /^goals = true$/m);
       assert.match(
@@ -350,6 +350,68 @@ describe("omx setup scope behavior", () => {
         configToml,
         /^\[hooks\.state\.".*\/\.codex\/hooks\.json:stop:0:0"\]$/m,
       );
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates legacy hooks.json state to config.toml and removes Codex-incompatible top-level state", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-setup-hooks-state-migration-"));
+    try {
+      const home = join(wd, "home");
+      const codexDir = join(wd, ".codex");
+      await mkdir(home, { recursive: true });
+      await mkdir(codexDir, { recursive: true });
+      await writeFile(
+        join(codexDir, "hooks.json"),
+        JSON.stringify(
+          {
+            state: {
+              "custom:/hooks.json:stop:0:0": {
+                trusted_hash: "sha256:user",
+                enabled: false,
+              },
+            },
+            hooks: {
+              Stop: [
+                {
+                  hooks: [
+                    {
+                      type: "command",
+                      command: 'node "/old/dist/scripts/codex-native-hook.js"',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      await writeFile(join(codexDir, "config.toml"), "omx_enabled = true\n");
+
+      const res = runOmx(wd, ["setup", "--scope", "project"], { HOME: home });
+      if (shouldSkipForSpawnPermissions(res.error)) return;
+      assert.equal(res.status, 0, res.stderr || res.stdout);
+
+      const hooksJson = JSON.parse(
+        await readFile(join(codexDir, "hooks.json"), "utf-8"),
+      ) as {
+        state?: unknown;
+        hooks?: Record<string, unknown>;
+      };
+      assert.equal(Object.hasOwn(hooksJson, "state"), false);
+      assert.equal(Object.hasOwn(hooksJson.hooks ?? {}, "state"), false);
+      assert.ok(hooksJson.hooks?.Stop, "managed setup should preserve Stop coverage");
+
+      const configToml = await readFile(join(codexDir, "config.toml"), "utf-8");
+      assert.match(
+        configToml,
+        /^\[hooks\.state\."custom:\/hooks\.json:stop:0:0"\]$/m,
+      );
+      assert.match(configToml, /^trusted_hash = "sha256:user"$/m);
+      assert.match(configToml, /^enabled = false$/m);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

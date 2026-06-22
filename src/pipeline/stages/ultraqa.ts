@@ -30,7 +30,11 @@ export interface UltraqaVerdict {
   clean: boolean;
   skipped: boolean;
   summary: string;
+  stage: 'ultraqa';
+  artifact_path: string;
+  reason?: string;
 }
+
 
 export function createUltraqaStage(options: UltraqaStageOptions = {}): PipelineStage {
   return {
@@ -55,6 +59,9 @@ export function createUltraqaStage(options: UltraqaStageOptions = {}): PipelineS
         summary: options.summary ?? (hasQaEvidence
           ? (clean ? 'UltraQA gate clean.' : 'UltraQA found issues; return to ralplan.')
           : 'UltraQA evidence missing; fail closed and return to ralplan.'),
+        stage: 'ultraqa',
+        artifact_path: '.omx/state/autopilot-state.json#pipeline_stage_results.ultraqa.artifacts.qa_verdict',
+        ...(skipped ? { reason: options.summary ?? 'UltraQA explicitly skipped.' } : {}),
       };
 
       return {

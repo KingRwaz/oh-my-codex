@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,8 @@ import {
   addGeneratedAgentsMarker,
   OMX_MANAGED_AGENTS_END_MARKER,
   OMX_MANAGED_AGENTS_START_MARKER,
+  OMX_USER_POLICY_END_MARKER,
+  OMX_USER_POLICY_START_MARKER,
 } from '../../utils/agents-md.js';
 import { resolveAgentsModelTableContext, upsertAgentsModelTable } from '../../utils/agents-model-table.js';
 
@@ -303,6 +305,309 @@ describe('omx setup AGENTS refresh behavior', () => {
     }
   });
 
+  it('preserves symlinked user-scope AGENTS.md during plugin-mode cleanup', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-symlink-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const dotfilesAgentsPath = join(wd, 'dotfiles', '.codex', 'AGENTS.md');
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(wd, 'dotfiles', '.codex'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await writeFile(
+        dotfilesAgentsPath,
+        addGeneratedAgentsMarker('# oh-my-codex - Intelligent Multi-Agent Orchestration\n\nDotfiles-owned guidance.\n'),
+      );
+      await symlink(dotfilesAgentsPath, codexAgentsPath);
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        force: true,
+      });
+
+      assert.match(output, /Plugin-mode AGENTS\.md defaults not selected; existing AGENTS\.md left untouched\./);
+      assert.equal(await readlink(codexAgentsPath), dotfilesAgentsPath);
+      assert.match(await readFile(codexAgentsPath, 'utf-8'), /Dotfiles-owned guidance\./);
+      assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('merges plugin-mode OMX-managed sections into an unmarked user AGENTS.md when explicitly requested', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-merge-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    const existing = '# Personal Instructions\n\nKeep this custom user guidance.\n';
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await writeFile(codexAgentsPath, existing);
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        mergeAgents: true,
+      });
+      const agentsContent = await readFile(codexAgentsPath, 'utf-8');
+
+      assert.match(output, /Merged plugin-mode OMX-managed AGENTS\.md sections into/);
+      assert.match(output, /agents_md: updated=1, unchanged=0, backed_up=1, skipped=0, removed=0/);
+      assert.match(agentsContent, /^# Personal Instructions/);
+      assert.match(agentsContent, /Keep this custom user guidance\./);
+      assert.match(agentsContent, new RegExp(OMX_MANAGED_AGENTS_START_MARKER));
+      assert.match(agentsContent, new RegExp(OMX_MANAGED_AGENTS_END_MARKER));
+      assert.match(agentsContent, /<!-- omx:generated:agents-md -->/);
+      assert.match(agentsContent, /# oh-my-codex - Intelligent Multi-Agent Orchestration/);
+      assert.equal(existsSync(join(home, '.omx', 'backups', 'setup')), true);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps plugin-mode explicit AGENTS.md merge idempotent on repeated runs', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-merge-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await writeFile(codexAgentsPath, '# Personal Instructions\n\nKeep this custom user guidance.\n');
+
+      await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        mergeAgents: true,
+      });
+      const firstContent = await readFile(codexAgentsPath, 'utf-8');
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        mergeAgents: true,
+      });
+      const secondContent = await readFile(codexAgentsPath, 'utf-8');
+
+      assert.equal(secondContent, firstContent);
+      assert.match(output, /Plugin-mode AGENTS\.md already up to date in/);
+      assert.match(output, /agents_md: updated=0, unchanged=1, backed_up=0, skipped=0, removed=0/);
+      assert.equal(countOccurrences(secondContent, OMX_MANAGED_AGENTS_START_MARKER), 1);
+      assert.equal(countOccurrences(secondContent, OMX_MANAGED_AGENTS_END_MARKER), 1);
+      assert.equal(countOccurrences(secondContent, '# oh-my-codex - Intelligent Multi-Agent Orchestration'), 1);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not ask for plugin AGENTS defaults during explicit plugin-mode AGENTS.md merge', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-merge-prompt-'));
+    const restoreTty = setMockTty(true);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    let promptCalls = 0;
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await writeFile(codexAgentsPath, '# Personal Instructions\n');
+
+      await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        mergeAgents: true,
+        pluginDeveloperInstructionsPrompt: async () => false,
+        pluginAgentsMdPrompt: async () => {
+          promptCalls += 1;
+          return true;
+        },
+      });
+
+      assert.equal(promptCalls, 0);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('skips plugin-mode explicit AGENTS.md merge for symlinked user AGENTS.md', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-symlink-merge-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const dotfilesAgentsPath = join(wd, 'dotfiles', '.codex', 'AGENTS.md');
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    const dotfilesContent = '# Dotfiles Instructions\n\nDotfiles-owned guidance.\n';
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(wd, 'dotfiles', '.codex'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await writeFile(dotfilesAgentsPath, dotfilesContent);
+      await symlink(dotfilesAgentsPath, codexAgentsPath);
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        mergeAgents: true,
+      });
+
+      assert.match(output, /Skipped plugin-mode AGENTS\.md merge for symlinked/);
+      assert.equal(await readlink(codexAgentsPath), dotfilesAgentsPath);
+      assert.equal(await readFile(dotfilesAgentsPath, 'utf-8'), dotfilesContent);
+      assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('skips plugin-mode explicit AGENTS.md merge for broken symlinked user AGENTS.md', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-broken-symlink-merge-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const missingAgentsPath = join(wd, 'dotfiles', '.codex', 'AGENTS.md');
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await symlink(missingAgentsPath, codexAgentsPath);
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        mergeAgents: true,
+      });
+
+      assert.match(output, /Skipped plugin-mode AGENTS\.md merge for symlinked/);
+      assert.equal(await readlink(codexAgentsPath), missingAgentsPath);
+      assert.equal(existsSync(missingAgentsPath), false);
+      assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('skips plugin-mode AGENTS defaults for symlinked user AGENTS.md even when prompted overwrite would be accepted', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-symlink-default-'));
+    const restoreTty = setMockTty(true);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const dotfilesAgentsPath = join(wd, 'dotfiles', '.codex', 'AGENTS.md');
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    const dotfilesContent = '# Dotfiles Instructions\n\nDotfiles-owned guidance.\n';
+    let promptCalls = 0;
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(wd, 'dotfiles', '.codex'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await writeFile(dotfilesAgentsPath, dotfilesContent);
+      await symlink(dotfilesAgentsPath, codexAgentsPath);
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        pluginDeveloperInstructionsPrompt: async () => false,
+        pluginAgentsMdPrompt: async () => {
+          promptCalls += 1;
+          return true;
+        },
+        agentsOverwritePrompt: async () => true,
+      });
+
+      assert.equal(promptCalls, 0);
+      assert.match(output, /Plugin-mode AGENTS\.md defaults not selected; existing AGENTS\.md left untouched\./);
+      assert.equal(await readlink(codexAgentsPath), dotfilesAgentsPath);
+      assert.equal(await readFile(dotfilesAgentsPath, 'utf-8'), dotfilesContent);
+      assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('skips plugin-mode AGENTS defaults for broken symlinked user AGENTS.md', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-broken-symlink-default-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const missingAgentsPath = join(wd, 'dotfiles', '.codex', 'AGENTS.md');
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await symlink(missingAgentsPath, codexAgentsPath);
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        force: true,
+        pluginDeveloperInstructionsPrompt: async () => false,
+      });
+
+      assert.match(output, /Plugin-mode AGENTS\.md defaults not selected; existing AGENTS\.md left untouched\./);
+      assert.equal(await readlink(codexAgentsPath), missingAgentsPath);
+      assert.equal(existsSync(missingAgentsPath), false);
+      assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves user-owned OMX policy blocks during forced plugin defaults refresh', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-policy-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const codexAgentsPath = join(home, '.codex', 'AGENTS.md');
+    const policyBlock = [
+      OMX_USER_POLICY_START_MARKER,
+      'Durable local operator rule: never drop this.',
+      OMX_USER_POLICY_END_MARKER,
+    ].join('\n');
+    try {
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await mkdir(join(home, '.codex'), { recursive: true });
+      await writeFile(codexAgentsPath, `# Local Instructions\n\n${policyBlock}\n`);
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'user',
+        installMode: 'plugin',
+        force: true,
+        pluginDeveloperInstructionsPrompt: async () => false,
+      });
+
+      const agents = await readFile(codexAgentsPath, 'utf-8');
+      assert.match(output, /Generated plugin-mode AGENTS\.md defaults/);
+      assert.match(agents, /# oh-my-codex - Intelligent Multi-Agent Orchestration/);
+      assert.match(agents, /Durable local operator rule: never drop this\./);
+      assert.equal(countOccurrences(agents, OMX_USER_POLICY_START_MARKER), 1);
+      assert.equal(countOccurrences(agents, OMX_USER_POLICY_END_MARKER), 1);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('merges OMX-managed sections into an unmarked user-authored AGENTS.md when explicitly requested', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-setup-agents-'));
     const restoreTty = setMockTty(false);
@@ -453,6 +758,85 @@ describe('omx setup AGENTS refresh behavior', () => {
       assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
       assert.equal(await readFile(join(wd, 'AGENTS.md'), 'utf-8'), existing);
       assert.equal(existsSync(join(wd, '.omx', 'backups', 'setup')), false);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('skips plugin-mode explicit AGENTS.md merge during an active project session', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-active-'));
+    const restoreTty = setMockTty(false);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const existing = '# active plugin project file\n';
+    try {
+      const pidStartTicks = await readCurrentLinuxStartTicks();
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await writeFile(join(wd, 'AGENTS.md'), existing);
+      await writeFile(
+        join(wd, '.omx', 'state', 'session.json'),
+        JSON.stringify({
+          session_id: 'sess-test',
+          started_at: new Date().toISOString(),
+          cwd: wd,
+          pid: process.pid,
+          pid_start_ticks: pidStartTicks,
+        }, null, 2)
+      );
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'project',
+        installMode: 'plugin',
+        mergeAgents: true,
+      });
+
+      assert.match(output, /WARNING: Active omx session detected/);
+      assert.match(output, /Skipping AGENTS\.md overwrite to avoid corrupting runtime overlay\./);
+      assert.match(output, /Stop the active session first, then re-run setup\./);
+      assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
+      assert.equal(await readFile(join(wd, 'AGENTS.md'), 'utf-8'), existing);
+    } finally {
+      restoreHome();
+      restoreTty();
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('skips plugin-mode AGENTS defaults during an active project session', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-setup-plugin-agents-active-default-'));
+    const restoreTty = setMockTty(true);
+    const home = join(wd, 'home');
+    const restoreHome = setMockHome(home);
+    const existing = '# active plugin project file\n';
+    try {
+      const pidStartTicks = await readCurrentLinuxStartTicks();
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await writeFile(join(wd, 'AGENTS.md'), existing);
+      await writeFile(
+        join(wd, '.omx', 'state', 'session.json'),
+        JSON.stringify({
+          session_id: 'sess-test',
+          started_at: new Date().toISOString(),
+          cwd: wd,
+          pid: process.pid,
+          pid_start_ticks: pidStartTicks,
+        }, null, 2)
+      );
+
+      const output = await runSetupWithCapturedLogs(wd, {
+        scope: 'project',
+        installMode: 'plugin',
+        force: true,
+        pluginDeveloperInstructionsPrompt: async () => false,
+      });
+
+      assert.match(output, /WARNING: Active omx session detected/);
+      assert.match(output, /Skipping AGENTS\.md overwrite to avoid corrupting runtime overlay\./);
+      assert.match(output, /Stop the active session first, then re-run setup\./);
+      assert.match(output, /agents_md: updated=0, unchanged=0, backed_up=0, skipped=1, removed=0/);
+      assert.equal(await readFile(join(wd, 'AGENTS.md'), 'utf-8'), existing);
     } finally {
       restoreHome();
       restoreTty();

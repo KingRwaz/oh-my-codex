@@ -88,6 +88,14 @@ describe('catalog schema', () => {
     assert.equal(autoresearch?.status, 'active');
   });
 
+  it('includes wiki as an active utility skill', () => {
+    const parsed = validateCatalogManifest(readSourceManifest());
+    const wiki = parsed.skills.find((skill) => skill.name === 'wiki');
+
+    assert.equal(wiki?.category, 'utility');
+    assert.equal(wiki?.status, 'active');
+  });
+
   it('includes ultragoal as a core execution skill', () => {
     const parsed = validateCatalogManifest(readSourceManifest());
     const ultragoal = parsed.skills.find((skill) => skill.name === 'ultragoal');

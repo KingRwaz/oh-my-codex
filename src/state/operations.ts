@@ -11,6 +11,7 @@ import {
   getReadScopedStatePaths,
   getStateDir,
   getStatePath,
+  resolveRuntimeStateScope,
   resolveStateScope,
   resolveWorkingDirectoryForState,
   validateSessionId,
@@ -21,13 +22,72 @@ import { ensureCanonicalRalphArtifacts } from '../ralph/persistence.js';
 import { RALPH_PHASES, validateAndNormalizeRalphState } from '../ralph/contract.js';
 import { applyRunOutcomeContract } from '../runtime/run-outcome.js';
 import {
+  hasCleanAutopilotReviewAndQaEvidence,
+  isAutopilotSuccessfulTerminalState,
+  validateAutopilotCompletionTransition,
+} from '../autopilot/completion-gate.js';
+import { readUltragoalState } from '../hud/state.js';
+import {
   SKILL_ACTIVE_STATE_MODE,
+  listActiveSkills,
   readSkillActiveState,
+  readVisibleSkillActiveStateForStateDir,
   syncCanonicalSkillStateForMode,
   writeSkillActiveStateCopiesForStateDir,
 } from './skill-active.js';
-import { isTrackedWorkflowMode } from './workflow-transition.js';
+import {
+  buildWorkflowTransitionError,
+  evaluateWorkflowTransition,
+  isTrackedWorkflowMode,
+  type TrackedWorkflowMode,
+} from './workflow-transition.js';
 import { reconcileWorkflowTransition } from './workflow-transition-reconcile.js';
+import {
+  buildAutopilotDeepInterviewRalplanGateError,
+  canAdvanceAutopilotDeepInterviewToRalplan,
+} from '../autopilot/deep-interview-gate.js';
+import {
+  type AutopilotChildPhase,
+  deriveAutopilotChildPhase,
+} from '../autopilot/fsm.js';
+import {
+  buildAutopilotRalplanUltragoalGateError,
+  canAdvanceAutopilotRalplanToUltragoal,
+} from '../autopilot/ralplan-gate.js';
+
+
+const AUTOPILOT_CHILD_PHASE_ORDER: AutopilotChildPhase[] = [
+  'deep-interview',
+  'ralplan',
+  'ultragoal',
+  'rework',
+  'team',
+  'ralph',
+  'code-review',
+  'ultraqa',
+];
+
+function autopilotPhaseOrder(phase: AutopilotChildPhase | null): number {
+  return phase ? AUTOPILOT_CHILD_PHASE_ORDER.indexOf(phase) : -1;
+}
+
+function isForwardAutopilotPhase(
+  currentPhase: AutopilotChildPhase | null,
+  nextPhase: AutopilotChildPhase | null,
+): boolean {
+  const currentOrder = autopilotPhaseOrder(currentPhase);
+  const nextOrder = autopilotPhaseOrder(nextPhase);
+  return currentOrder >= 0 && nextOrder > currentOrder;
+}
+
+function isNextAutopilotPhase(
+  currentPhase: AutopilotChildPhase | null,
+  nextPhase: AutopilotChildPhase | null,
+): boolean {
+  const currentOrder = autopilotPhaseOrder(currentPhase);
+  const nextOrder = autopilotPhaseOrder(nextPhase);
+  return currentOrder >= 0 && nextOrder === currentOrder + 1;
+}
 
 export const SUPPORTED_STATE_READ_MODES = [
   'autopilot',
@@ -104,6 +164,32 @@ async function writeClearedSessionScopedModeState(
   await writeAtomicFile(path, JSON.stringify(clearedState, null, 2));
 }
 
+async function clearSessionNativeStopState(baseStateDir: string, sessionId: string): Promise<string[]> {
+  const paths = [
+    join(baseStateDir, 'native-stop-state.json'),
+    join(baseStateDir, 'sessions', sessionId, 'native-stop-state.json'),
+  ];
+  const changed: string[] = [];
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    let state: Record<string, unknown>;
+    try {
+      state = JSON.parse(await readFile(path, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const sessions = state.sessions && typeof state.sessions === 'object' && !Array.isArray(state.sessions)
+      ? { ...(state.sessions as Record<string, unknown>) }
+      : null;
+    if (!sessions || !Object.prototype.hasOwnProperty.call(sessions, sessionId)) continue;
+    delete sessions[sessionId];
+    state.sessions = sessions;
+    await writeAtomicFile(path, JSON.stringify(state, null, 2));
+    changed.push(path);
+  }
+  return changed;
+}
+
 function readModeSupportsStrictValidation(mode: string): mode is SupportedStateReadMode {
   return SUPPORTED_STATE_READ_MODES.includes(mode as SupportedStateReadMode);
 }
@@ -135,6 +221,29 @@ function hasExplicitStateField(
       customState != null
       && Object.prototype.hasOwnProperty.call(customState as Record<string, unknown>, key)
     );
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function normalizeCleanAutopilotCompletionEvidence(state: Record<string, unknown>): void {
+  if (!isAutopilotSuccessfulTerminalState(state) || !hasCleanAutopilotReviewAndQaEvidence(state)) return;
+
+  const reviewVerdict = state.review_verdict;
+  const qaVerdict = state.qa_verdict;
+  const nestedState = { ...objectRecord(state.state) };
+  const handoffArtifacts = { ...objectRecord(nestedState.handoff_artifacts ?? state.handoff_artifacts) };
+
+  handoffArtifacts.code_review = reviewVerdict;
+  handoffArtifacts.ultraqa = qaVerdict;
+  state.handoff_artifacts = handoffArtifacts;
+  state.return_to_ralplan_reason = null;
+  nestedState.handoff_artifacts = handoffArtifacts;
+  nestedState.review_verdict = reviewVerdict;
+  nestedState.qa_verdict = qaVerdict;
+  nestedState.return_to_ralplan_reason = null;
+  state.state = nestedState;
 }
 
 export async function listStateStatuses(
@@ -173,6 +282,19 @@ export async function listStateStatuses(
     }
   }
 
+  if (!mode || mode === 'ultragoal') {
+    const ultragoal = await readUltragoalState(cwd).catch(() => null);
+    if (ultragoal && (ultragoal.active || (mode === 'ultragoal' && !seenModes.has('ultragoal')))) {
+      statuses.ultragoal = {
+        active: ultragoal.active,
+        phase: ultragoal.status,
+        path: join(cwd, '.omx', 'ultragoal', 'goals.json'),
+        data: ultragoal,
+        source: 'ultragoal-artifacts',
+      };
+    }
+  }
+
   return statuses;
 }
 
@@ -182,13 +304,80 @@ export async function listActiveStateModes(
   explicitSessionId?: string,
 ): Promise<string[]> {
   const cwd = resolveWorkingDirectoryForState(workingDirectory);
-  const sessionId = validateSessionId(explicitSessionId);
+  const scope = await resolveRuntimeStateScope(cwd, explicitSessionId);
+  const sessionId = scope.sessionId;
   const statuses = await listStateStatuses(cwd, sessionId, undefined, {
     authoritativeActiveDecision: true,
   });
+  const canonicalState = await readVisibleSkillActiveStateForStateDir(getBaseStateDir(cwd), sessionId);
+  const canonicalActiveModes = new Set(
+    listActiveSkills(canonicalState ?? {})
+      .filter((entry) => {
+        const entrySessionId = typeof entry.session_id === 'string' ? entry.session_id.trim() : '';
+        return sessionId ? entrySessionId === sessionId : entrySessionId.length === 0;
+      })
+      .map((entry) => entry.skill),
+  );
+  const hasCanonicalVisibility = canonicalState !== null;
+
   return Object.entries(statuses)
-    .filter(([, status]) => Boolean((status as { active?: unknown }).active))
+    .filter(([mode, status]) => {
+      if (!Boolean((status as { active?: unknown }).active)) return false;
+      if (hasCanonicalVisibility && isTrackedWorkflowMode(mode)) {
+        return canonicalActiveModes.has(mode);
+      }
+      return true;
+    })
     .map(([mode]) => mode);
+}
+
+async function readCanonicalActiveWorkflowModes(
+  baseStateDir: string,
+  sessionId?: string,
+): Promise<TrackedWorkflowMode[]> {
+  const normalizedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+  const canonicalState = await readVisibleSkillActiveStateForStateDir(baseStateDir, sessionId);
+  const activeModes = listActiveSkills(canonicalState ?? {})
+    .filter((entry) => {
+      const entrySessionId = typeof entry.session_id === 'string' ? entry.session_id.trim() : '';
+      return normalizedSessionId ? entrySessionId === normalizedSessionId : entrySessionId.length === 0;
+    })
+    .map((entry) => entry.skill)
+    .filter(isTrackedWorkflowMode);
+  return [...new Set(activeModes)];
+}
+
+function isActiveDetailWorkflowState(state: Record<string, unknown>): boolean {
+  if (state.active !== true) return false;
+  const phase = typeof state.current_phase === 'string' ? state.current_phase.trim().toLowerCase() : '';
+  return !['complete', 'completed', 'cancelled', 'canceled', 'failed', 'cleared'].includes(phase);
+}
+
+async function readSessionDetailTransitionModes(
+  cwd: string,
+  sessionId: string | undefined,
+  requestedMode: TrackedWorkflowMode,
+): Promise<TrackedWorkflowMode[] | undefined> {
+  if (!sessionId || requestedMode !== 'ralplan') return undefined;
+  const autopilotPath = getStatePath('autopilot', cwd, sessionId);
+  if (existsSync(autopilotPath)) {
+    try {
+      const state = JSON.parse(await readFile(autopilotPath, 'utf-8')) as Record<string, unknown>;
+      if (isActiveDetailWorkflowState(state)) return ['autopilot'];
+    } catch {
+      return undefined;
+    }
+  }
+
+  const deepInterviewPath = getStatePath('deep-interview', cwd, sessionId);
+  if (!existsSync(deepInterviewPath)) return undefined;
+
+  try {
+    const state = JSON.parse(await readFile(deepInterviewPath, 'utf-8')) as Record<string, unknown>;
+    return isActiveDetailWorkflowState(state) ? ['deep-interview'] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function executeStateOperation(
@@ -255,6 +444,7 @@ export async function executeStateOperation(
             ...fields,
             ...((customState as Record<string, unknown>) || {}),
           } as Record<string, unknown>;
+          delete mergedRaw.trustedPipelineProgress;
           if (!hasExplicitStateField(fields, customState, 'run_outcome')) {
             delete mergedRaw.run_outcome;
           }
@@ -310,13 +500,122 @@ export async function executeStateOperation(
             Object.assign(mergedRaw, runOutcomeValidation.state);
           }
 
+          if (mode === 'autopilot') {
+            normalizeCleanAutopilotCompletionEvidence(mergedRaw);
+          }
+
+          const currentAutopilotChildPhase = mode === 'autopilot'
+            ? deriveAutopilotChildPhase({ mode: 'autopilot', ...existing })
+            : null;
+          const nextAutopilotChildPhase = mode === 'autopilot'
+            ? deriveAutopilotChildPhase({ mode: 'autopilot', ...mergedRaw })
+            : null;
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'deep-interview'
+            && isAutopilotSuccessfulTerminalState(mergedRaw)
+          ) {
+            validationError = 'Cannot complete Autopilot before ralplan gate: deep-interview may only advance to ralplan.';
+            return;
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'ralplan'
+            && isAutopilotSuccessfulTerminalState(mergedRaw)
+          ) {
+            validationError = 'Cannot complete Autopilot before ultragoal gate: ralplan may only advance to ultragoal.';
+            return;
+          }
+
+          if (mode === 'autopilot') {
+            const completionTransitionError = validateAutopilotCompletionTransition(
+              existing as Record<string, unknown>,
+              mergedRaw,
+            );
+            if (completionTransitionError) {
+              validationError = completionTransitionError;
+              return;
+            }
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'deep-interview'
+            && isForwardAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+            && !isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            validationError = 'Cannot skip Autopilot ralplan gate: deep-interview may only advance to ralplan.';
+            return;
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'deep-interview'
+            && isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            const gate = await canAdvanceAutopilotDeepInterviewToRalplan({
+              cwd,
+              sessionId: effectiveSessionId,
+              baseStateDir,
+              currentState: existing as Record<string, unknown>,
+              nextState: mergedRaw,
+            });
+            if (!gate.allowed) {
+              validationError = buildAutopilotDeepInterviewRalplanGateError(gate);
+              return;
+            }
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'ralplan'
+            && isForwardAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+            && !isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            validationError = 'Cannot skip Autopilot ultragoal gate: ralplan may only advance to ultragoal.';
+            return;
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'ralplan'
+            && isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            const gate = canAdvanceAutopilotRalplanToUltragoal({
+              cwd,
+              sessionId: effectiveSessionId,
+              currentState: existing as Record<string, unknown>,
+              nextState: mergedRaw,
+            });
+            if (!gate.allowed) {
+              validationError = buildAutopilotRalplanUltragoalGateError(gate);
+              return;
+            }
+          }
+
           if (isTrackedWorkflowMode(mode) && mergedRaw.active === true) {
+            const activeCanonicalModes = await readCanonicalActiveWorkflowModes(baseStateDir, effectiveSessionId);
+            const canonicalDecision = evaluateWorkflowTransition(activeCanonicalModes, mode);
+            if (!canonicalDecision.allowed && canonicalDecision.denialReason === 'rollback') {
+              validationError = buildWorkflowTransitionError(activeCanonicalModes, mode, 'write');
+              return;
+            }
+            const transitionCurrentModes = mode === 'ralplan'
+              ? (
+                activeCanonicalModes.length > 0
+                  ? activeCanonicalModes
+                  : await readSessionDetailTransitionModes(cwd, effectiveSessionId, mode)
+              )
+              : undefined;
             try {
               const transition = await reconcileWorkflowTransition(cwd, mode, {
                 action: 'write',
                 sessionId: effectiveSessionId,
                 source: 'state-operations',
                 baseStateDir,
+                ...(transitionCurrentModes ? { currentModes: transitionCurrentModes } : {}),
               });
               transitionMessage ??= transition.transitionMessage;
             } catch (error) {
@@ -387,6 +686,9 @@ export async function executeStateOperation(
           } else if (existsSync(path)) {
             await unlink(path);
           }
+          const nativeStopCleared = effectiveSessionId
+            ? await clearSessionNativeStopState(baseStateDir, effectiveSessionId)
+            : [];
           if (mode !== SKILL_ACTIVE_STATE_MODE) {
             await syncCanonicalSkillStateForMode({
               cwd,
@@ -397,7 +699,7 @@ export async function executeStateOperation(
               source: 'state-operations',
             });
           }
-          return { payload: { cleared: true, mode, path } };
+          return { payload: { cleared: true, mode, path, ...(nativeStopCleared.length > 0 ? { native_stop_cleared: nativeStopCleared } : {}) } };
         }
 
         const removedPaths: string[] = [];

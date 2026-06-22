@@ -14,6 +14,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setup } from "../setup.js";
 
+const TEST_CODEX_PROBES = {
+  codexFeaturesProbe: () => null,
+  codexVersionProbe: () => null,
+} satisfies Parameters<typeof setup>[0];
+
 const EXPECTED_PROJECT_GITIGNORE = [
   ".omx/",
   ".codex/*",
@@ -49,7 +54,7 @@ async function runSetupWithCapturedLogs(
     logs.push(args.map((arg) => String(arg)).join(" "));
   };
   try {
-    await setup(options);
+    await setup({ ...TEST_CODEX_PROBES, ...options });
     return logs.join("\n");
   } finally {
     console.log = originalLog;
@@ -65,7 +70,7 @@ describe("omx setup refresh summary and dry-run behavior", () => {
     const previousCwd = process.cwd();
     process.chdir(wd);
     try {
-      await setup(options);
+      await setup({ ...TEST_CODEX_PROBES, ...options });
     } finally {
       process.chdir(previousCwd);
     }
@@ -159,6 +164,82 @@ describe("omx setup refresh summary and dry-run behavior", () => {
     }
   });
 
+  it("omits Team skills and generated guidance when Team mode is disabled", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-setup-refresh-no-team-"));
+    try {
+      await runSetupInTempDir(wd, {
+        scope: "project",
+        installMode: "legacy",
+        teamMode: "disabled",
+      });
+
+      for (const skillName of [
+        "autopilot",
+        "ralplan",
+        "ralph",
+        "ultragoal",
+        "code-review",
+        "ultraqa",
+      ]) {
+        assert.equal(
+          existsSync(join(wd, ".codex", "skills", skillName, "SKILL.md")),
+          true,
+          `expected disabled Team setup to preserve ${skillName}`,
+        );
+      }
+      assert.equal(existsSync(join(wd, ".codex", "skills", "team", "SKILL.md")), false);
+      assert.equal(existsSync(join(wd, ".codex", "skills", "worker", "SKILL.md")), false);
+      assert.equal(existsSync(join(wd, ".codex", "prompts", "team-executor.md")), false);
+      assert.equal(existsSync(join(wd, ".codex", "agents", "team-executor.toml")), false);
+      assert.equal(existsSync(join(wd, ".codex", "agents", "executor.toml")), true);
+
+      const persisted = JSON.parse(
+        await readFile(join(wd, ".omx", "setup-scope.json"), "utf-8"),
+      ) as { teamMode?: string };
+      assert.equal(persisted.teamMode, "disabled");
+
+      const agents = await readFile(join(wd, "AGENTS.md"), "utf-8");
+      assert.doesNotMatch(agents, /\$team/);
+      assert.doesNotMatch(agents, /<team_(?:compositions|pipeline|model_resolution)>/);
+      assert.doesNotMatch(agents, /\bTeam mode\b/);
+      assert.doesNotMatch(agents, /\bteam-executor\b/);
+      assert.match(agents, /\$ralph/);
+      assert.match(agents, /autopilot/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("removes managed Team guidance and role files when Team mode is disabled on refresh", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-setup-refresh-disable-team-"));
+    try {
+      await runSetupInTempDir(wd, {
+        scope: "project",
+        installMode: "legacy",
+        teamMode: "enabled",
+      });
+      assert.equal(existsSync(join(wd, ".codex", "prompts", "team-executor.md")), true);
+      assert.equal(existsSync(join(wd, ".codex", "agents", "team-executor.toml")), true);
+      assert.match(await readFile(join(wd, "AGENTS.md"), "utf-8"), /\$team/);
+
+      await runSetupInTempDir(wd, {
+        scope: "project",
+        installMode: "legacy",
+        teamMode: "disabled",
+      });
+
+      assert.equal(existsSync(join(wd, ".codex", "prompts", "team-executor.md")), false);
+      assert.equal(existsSync(join(wd, ".codex", "agents", "team-executor.toml")), false);
+      const agents = await readFile(join(wd, "AGENTS.md"), "utf-8");
+      assert.doesNotMatch(agents, /\$team/);
+      assert.doesNotMatch(agents, /<team_(?:compositions|pipeline|model_resolution)>/);
+      assert.doesNotMatch(agents, /\bteam-executor\b/);
+      assert.match(agents, /\$ralph/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it("appends missing OMX project ignore rules to an existing project .gitignore without duplicating them", async () => {
     const wd = await mkdtemp(join(tmpdir(), "omx-setup-refresh-"));
     try {
@@ -200,6 +281,30 @@ describe("omx setup refresh summary and dry-run behavior", () => {
       const initResult = spawnSync("git", ["init", "-q"], { cwd: wd });
       assert.equal(initResult.status, 0);
       await writeFile(join(wd, ".git", "info", "exclude"), ".omx/\n");
+
+      await runSetupInTempDir(wd, { scope: "project" });
+
+      const gitignore = await readFile(join(wd, ".gitignore"), "utf-8");
+      assert.equal(gitignore, EXPECTED_PROJECT_GITIGNORE_WITHOUT_OMX);
+      assert.equal(gitignore.match(/^\.omx\/$/gm)?.length ?? 0, 0);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("creates .gitignore without .omx/ when global Git excludes already ignore it", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-setup-refresh-global-ignore-"));
+    const excludesFile = join(wd, "global-ignore");
+    try {
+      const initResult = spawnSync("git", ["init", "-q"], { cwd: wd });
+      assert.equal(initResult.status, 0);
+      await writeFile(excludesFile, ".omx/\n");
+      const configResult = spawnSync(
+        "git",
+        ["config", "core.excludesfile", excludesFile],
+        { cwd: wd },
+      );
+      assert.equal(configResult.status, 0);
 
       await runSetupInTempDir(wd, { scope: "project" });
 

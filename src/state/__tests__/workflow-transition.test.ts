@@ -92,11 +92,25 @@ describe('workflow transition rules', () => {
     assert.deepEqual(interviewToAutoresearch.resultingModes, ['autoresearch']);
     assert.equal(interviewToAutoresearch.transitionMessage, 'mode transiting: deep-interview -> autoresearch');
 
+    const interviewToUltragoal = evaluateWorkflowTransition(['deep-interview'], 'ultragoal');
+    assert.equal(interviewToUltragoal.allowed, true);
+    assert.equal(interviewToUltragoal.kind, 'auto-complete');
+    assert.deepEqual(interviewToUltragoal.autoCompleteModes, ['deep-interview']);
+    assert.deepEqual(interviewToUltragoal.resultingModes, ['ultragoal']);
+    assert.equal(interviewToUltragoal.transitionMessage, 'mode transiting: deep-interview -> ultragoal');
+
     const ralplanToRalph = evaluateWorkflowTransition(['ralplan', 'ultrawork'], 'ralph');
     assert.equal(ralplanToRalph.allowed, true);
     assert.equal(ralplanToRalph.kind, 'auto-complete');
     assert.deepEqual(ralplanToRalph.autoCompleteModes, ['ralplan']);
     assert.deepEqual(ralplanToRalph.resultingModes, ['ultrawork', 'ralph']);
+
+    const ralplanToUltragoal = evaluateWorkflowTransition(['ralplan'], 'ultragoal');
+    assert.equal(ralplanToUltragoal.allowed, true);
+    assert.equal(ralplanToUltragoal.kind, 'auto-complete');
+    assert.deepEqual(ralplanToUltragoal.autoCompleteModes, ['ralplan']);
+    assert.deepEqual(ralplanToUltragoal.resultingModes, ['ultragoal']);
+    assert.equal(ralplanToUltragoal.transitionMessage, 'mode transiting: ralplan -> ultragoal');
 
     const ralplanToAutoresearch = evaluateWorkflowTransition(['ralplan'], 'autoresearch');
     assert.equal(ralplanToAutoresearch.allowed, true);
@@ -113,13 +127,13 @@ describe('workflow transition rules', () => {
   });
 
 
-  it('allows autopilot to return to ralplan for non-clean code-review cycles', () => {
+  it('does not auto-complete Autopilot when starting ralplan as a child-stage name', () => {
     const decision = evaluateWorkflowTransition(['autopilot'], 'ralplan');
-    assert.equal(decision.allowed, true);
-    assert.equal(decision.kind, 'auto-complete');
-    assert.deepEqual(decision.autoCompleteModes, ['autopilot']);
-    assert.deepEqual(decision.resultingModes, ['ralplan']);
-    assert.equal(decision.transitionMessage, 'mode transiting: autopilot -> ralplan');
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.kind, 'deny');
+    assert.equal(decision.denialReason, 'rollback');
+    assert.deepEqual(decision.autoCompleteModes, []);
+    assert.deepEqual(decision.resultingModes, ['autopilot']);
   });
 
   it('formats transition audit messages', () => {
@@ -188,6 +202,38 @@ describe('workflow transition rules', () => {
     });
   });
 
+  it('does not auto-complete session mode detail when canonical skill state is absent', async () => {
+    await withIsolatedStateEnv(async () => {
+      const wd = await mkdtemp(join(tmpdir(), 'omx-workflow-reconcile-detail-only-'));
+      try {
+        const sessionId = 'sess-detail-only';
+        const sessionDir = join(wd, '.omx', 'state', 'sessions', sessionId);
+        const staleRalplanPath = join(sessionDir, 'ralplan-state.json');
+        await mkdir(sessionDir, { recursive: true });
+        await writeFile(
+          staleRalplanPath,
+          JSON.stringify({ active: true, mode: 'ralplan', current_phase: 'review' }, null, 2),
+          'utf-8',
+        );
+
+        const transition = await reconcileWorkflowTransition(wd, 'team', {
+          action: 'start',
+          sessionId,
+          source: 'test',
+        });
+
+        assert.equal(transition.decision.allowed, true);
+        assert.deepEqual(transition.decision.currentModes, []);
+        assert.deepEqual(transition.completedPaths, []);
+
+        const staleRalplan = JSON.parse(await readFile(staleRalplanPath, 'utf-8')) as { active?: unknown };
+        assert.equal(staleRalplan.active, true);
+      } finally {
+        await rm(wd, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('co-locates auto-completed mode detail and canonical skill state under an explicit base state dir', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omx-workflow-reconcile-base-dir-'));
     try {
@@ -198,7 +244,15 @@ describe('workflow transition rules', () => {
       await mkdir(sessionDir, { recursive: true });
       await writeFile(
         join(sessionDir, 'deep-interview-state.json'),
-        JSON.stringify({ active: true, mode: 'deep-interview', current_phase: 'interviewing' }, null, 2),
+        JSON.stringify({
+          active: true,
+          mode: 'deep-interview',
+          current_phase: 'interviewing',
+          deep_interview_gate: {
+            status: 'complete',
+            rationale: 'Requirements have been clarified and handed to ralplan.',
+          },
+        }, null, 2),
         'utf-8',
       );
       await writeFile(
@@ -244,4 +298,70 @@ describe('workflow transition rules', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('denies deep-interview to ralplan reconciliation when only handoff-cleared question evidence exists', async () => {
+    await withIsolatedStateEnv(async () => {
+      const root = await mkdtemp(join(tmpdir(), 'omx-workflow-reconcile-ralplan-gate-deny-'));
+      try {
+        const wd = join(root, 'source');
+        const baseStateDir = join(root, 'boxed-state');
+        const sessionId = 'sess-transition-gate-deny';
+        const sessionDir = join(baseStateDir, 'sessions', sessionId);
+        await mkdir(sessionDir, { recursive: true });
+        await writeFile(
+          join(sessionDir, 'deep-interview-state.json'),
+          JSON.stringify({
+            active: true,
+            mode: 'deep-interview',
+            current_phase: 'interviewing',
+            question_enforcement: {
+              obligation_id: 'obligation-cleared',
+              source: 'omx-question',
+              status: 'cleared',
+              lifecycle_outcome: 'askuserQuestion',
+              requested_at: '2026-05-28T00:00:00.000Z',
+              cleared_at: '2026-05-28T00:01:00.000Z',
+              clear_reason: 'handoff',
+            },
+          }, null, 2),
+          'utf-8',
+        );
+        await writeFile(
+          join(sessionDir, 'skill-active-state.json'),
+          JSON.stringify({
+            version: 1,
+            active: true,
+            skill: 'deep-interview',
+            phase: 'interviewing',
+            active_skills: [
+              {
+                skill: 'deep-interview',
+                phase: 'interviewing',
+                active: true,
+                session_id: sessionId,
+              },
+            ],
+          }, null, 2),
+          'utf-8',
+        );
+
+        await assert.rejects(
+          reconcileWorkflowTransition(wd, 'ralplan', {
+            action: 'start',
+            sessionId,
+            source: 'test',
+            baseStateDir,
+          }),
+          /cleared deep-interview question obligations with handoff\/error are not completion evidence/i,
+        );
+
+        const boxedMode = JSON.parse(await readFile(join(sessionDir, 'deep-interview-state.json'), 'utf-8')) as Record<string, unknown>;
+        assert.equal(boxedMode.active, true);
+        assert.equal(boxedMode.current_phase, 'interviewing');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
 });

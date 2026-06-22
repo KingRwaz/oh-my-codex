@@ -9,11 +9,11 @@
 [![npm version](https://img.shields.io/npm/v/oh-my-codex)](https://www.npmjs.com/package/oh-my-codex)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
-[![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
+[![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/sj4exxQ9v)
 
 **Вебсайт:** https://yeachan-heo.github.io/oh-my-codex-website/
 **Документація:** [Початок роботи](../getting-started.html) · [Агенти](../agents.html) · [Навички](../skills.html) · [Інтеграції](../integrations.html) · [Demo](../../DEMO.md) · [Посібник OpenClaw](../openclaw-integration.uk.md)
-**Спільнота:** [Discord](https://discord.gg/PUwSMR9XNk) — спільний сервер OMX/спільноти для oh-my-codex та суміжних інструментів.
+**Спільнота:** [Discord](https://discord.gg/sj4exxQ9v) — спільний сервер OMX/спільноти для oh-my-codex та суміжних інструментів.
 
 OMX — це шар робочих процесів для [OpenAI Codex CLI](https://github.com/openai/codex).
 
@@ -176,15 +176,14 @@ omx team shutdown <team-name>
 - `omx doctor` перевіряє встановлення, коли щось здається не так
 - `omx hud --watch` — це інструмент моніторингу стану, а не основний робочий процес користувача
 
-### Explore і sparkshell
+### Sparkshell
 
-- `omx explore --prompt "..."` призначений для пошуку в репозиторії лише для читання
 - `omx sparkshell <command>` призначений для перевірки в терміналі та обмеженої валідації
+- для пошуку в репозиторії лише для читання використовуйте звичайні інструменти/субагенти інспекції репозиторію Codex (застарілу команду `omx explore` вилучено)
 
 Приклади:
 
 ```bash
-omx explore --prompt "find where team state is written"
 omx sparkshell git status
 omx sparkshell --tmux-pane %12 --tail-lines 400
 ```

@@ -9,7 +9,7 @@
 [![npm version](https://img.shields.io/npm/v/oh-my-codex)](https://www.npmjs.com/package/oh-my-codex)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
-[![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
+[![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/sj4exxQ9v)
 
 **Strona:** https://yeachan-heo.github.io/oh-my-codex-website/
 **Dokumentacja:** [Pierwsze kroki](../getting-started.html) · [Agenty](../agents.html) · [Skille](../skills.html) · [Integracje](../integrations.html) · [Demo](../../DEMO.md) · [Przewodnik po OpenClaw](../openclaw-integration.md)
@@ -146,15 +146,14 @@ omx team shutdown <team-name>
 - `omx doctor` — sprawdza instalację, gdy coś nie działa
 - `omx hud --watch` — podgląd stanu i postępu, nie główny cykl pracy
 
-### Explore i sparkshell
+### Sparkshell
 
-- `omx explore --prompt "..."` — przeszukuje repo tylko do odczytu
 - `omx sparkshell <command>` — inspekcja w shellu i ograniczona weryfikacja
+- do przeszukiwania repo tylko do odczytu używaj zwykłych narzędzi/subagentów inspekcji repozytorium Codex (przestarzałe polecenie `omx explore` zostało usunięte)
 
 Przykłady:
 
 ```bash
-omx explore --prompt "find where team state is written"
 omx sparkshell git status
 omx sparkshell --tmux-pane %12 --tail-lines 400
 ```

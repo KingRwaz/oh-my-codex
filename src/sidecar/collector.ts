@@ -1,6 +1,7 @@
 import { open, readFile, readdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { TEAM_NAME_SAFE_PATTERN, TEAM_TASK_STATUSES, WORKER_NAME_SAFE_PATTERN } from '../team/contracts.js';
+import { resolveCanonicalTeamStateRoot } from '../team/state-root.js';
 import type {
   CollectSidecarSnapshotOptions,
   SidecarEvent,
@@ -46,13 +47,8 @@ function asTaskStatus(value: unknown): SidecarTask['status'] {
   return typeof value === 'string' && (TEAM_TASK_STATUSES as readonly string[]).includes(value) ? value as SidecarTask['status'] : 'pending';
 }
 
-function stateRoot(cwd: string, env: NodeJS.ProcessEnv): string {
-  const explicit = safeString(env.OMX_TEAM_STATE_ROOT);
-  return explicit ? resolve(cwd, explicit) : join(cwd, '.omx', 'state');
-}
-
 function teamRoot(teamName: string, cwd: string, env: NodeJS.ProcessEnv): string {
-  return join(stateRoot(cwd, env), 'team', teamName);
+  return join(resolveCanonicalTeamStateRoot(cwd, env), 'team', teamName);
 }
 
 async function readJson<T>(path: string): Promise<T | null> {

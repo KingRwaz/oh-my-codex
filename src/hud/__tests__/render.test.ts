@@ -29,6 +29,7 @@ function emptyCtx(): HudRenderContext {
     ralplan: null,
     deepInterview: null,
     autoresearch: null,
+    codeReview: null,
     ultraqa: null,
     team: null,
     metrics: null,
@@ -195,6 +196,62 @@ describe('renderHud – autoresearch', () => {
   });
 });
 
+// ── Code review ───────────────────────────────────────────────────────────────
+
+describe('renderHud – code-review', () => {
+  it('renders code-review with the current phase', () => {
+    const ctx = { ...emptyCtx(), codeReview: { active: true, current_phase: 'running' } };
+    const result = renderHud(ctx, 'focused');
+    assert.ok(result.includes(`${GREEN}code-review:running${RESET}`));
+  });
+
+  it('suppresses duplicate late autopilot code-review status', () => {
+    const ctx = {
+      ...emptyCtx(),
+      autopilot: { active: true, current_phase: 'code-review' },
+      codeReview: { active: true, current_phase: 'autopilot', source: 'autopilot' as const },
+    };
+    const result = stripSgr(renderHud(ctx, 'focused'));
+    assert.ok(result.includes('autopilot:code-review'));
+    assert.equal(result.includes('code-review:running'), false);
+  });
+
+  it('drops mismatched autopilot-derived late gate labels', () => {
+    const ctx = {
+      ...emptyCtx(),
+      autopilot: { active: true, current_phase: 'code-review' },
+      codeReview: { active: true, current_phase: 'autopilot', source: 'autopilot' as const },
+      ultraqa: { active: true, current_phase: 'autopilot', source: 'autopilot' as const },
+    };
+    const result = stripSgr(renderHud(ctx, 'focused'));
+    assert.ok(result.includes('autopilot:code-review'));
+    assert.equal(result.includes('qa:autopilot'), false);
+    assert.equal(result.includes('autopilot:ultraqa'), false);
+  });
+
+  it('keeps autopilot visible when only a mismatched derived late gate exists', () => {
+    const ctx = {
+      ...emptyCtx(),
+      autopilot: { active: true, current_phase: 'code-review' },
+      ultraqa: { active: true, current_phase: 'autopilot', source: 'autopilot' as const },
+    };
+    const result = stripSgr(renderHud(ctx, 'focused'));
+    assert.ok(result.includes('autopilot:code-review'));
+    assert.equal(result.includes('qa:autopilot'), false);
+  });
+
+  it('keeps canonical code-review distinct from an autopilot late phase', () => {
+    const ctx = {
+      ...emptyCtx(),
+      autopilot: { active: true, current_phase: 'code-review' },
+      codeReview: { active: true, current_phase: 'planning', source: 'canonical-skill' as const },
+    };
+    const result = stripSgr(renderHud(ctx, 'focused'));
+    assert.ok(result.includes('autopilot:code-review'));
+    assert.ok(result.includes('code-review:planning'));
+  });
+});
+
 // ── Ultraqa ───────────────────────────────────────────────────────────────────
 
 describe('renderHud – ultraqa', () => {
@@ -202,6 +259,17 @@ describe('renderHud – ultraqa', () => {
     const ctx = { ...emptyCtx(), ultraqa: { active: true, current_phase: 'diagnose' } };
     const result = renderHud(ctx, 'focused');
     assert.ok(result.includes(`${GREEN}qa:diagnose${RESET}`));
+  });
+
+  it('suppresses duplicate late autopilot ultraqa status', () => {
+    const ctx = {
+      ...emptyCtx(),
+      autopilot: { active: true, current_phase: 'ultraqa' },
+      ultraqa: { active: true, current_phase: 'autopilot', source: 'autopilot' as const },
+    };
+    const result = stripSgr(renderHud(ctx, 'focused'));
+    assert.ok(result.includes('autopilot:ultraqa'));
+    assert.equal(result.includes('qa:autopilot'), false);
   });
 });
 
@@ -237,6 +305,387 @@ describe('renderHud – team', () => {
   it('omits team when null', () => {
     const result = renderHud(emptyCtx(), 'focused');
     assert.ok(!result.includes('team'));
+  });
+});
+
+// ── Ultragoal ────────────────────────────────────────────────────────────────
+
+describe('renderHud – ultragoal', () => {
+  it('uses a distinct accent for the current ultragoal only', () => {
+    const ctx = {
+      ...emptyCtx(),
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 2,
+        complete: 0,
+        pending: 1,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 2,
+        activeGoal: {
+          id: 'G001-active',
+          title: 'Active goal highlight',
+          objective: 'highlight current goal',
+          status: 'in_progress',
+          index: 1,
+        },
+        nextGoals: [{
+          id: 'G002-next',
+          title: 'Next goal',
+          objective: 'lower priority',
+          status: 'pending',
+          index: 2,
+        }],
+      },
+    };
+
+    const result = renderHud(ctx, 'focused', { maxWidth: 220, maxLines: 3 });
+
+    assert.ok(result.includes('\x1b[35mG001-active: Active goal highlight\x1b[0m'));
+    assert.ok(!result.includes('\x1b[35mG002-next'));
+  });
+
+  it('preserves the current ultragoal accent under constrained-width truncation', () => {
+    const ctx = {
+      ...emptyCtx(),
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 2,
+        complete: 0,
+        pending: 1,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 2,
+        activeGoal: {
+          id: 'G001-active',
+          title: 'Active goal highlight that must stay accented',
+          objective: 'highlight current goal',
+          status: 'in_progress',
+          index: 1,
+        },
+        nextGoals: [{
+          id: 'G002-next',
+          title: 'Lower priority next goal that may be truncated',
+          objective: 'lower priority',
+          status: 'pending',
+          index: 2,
+        }],
+      },
+    };
+
+    const result = renderHud(ctx, 'focused', { maxWidth: 80, maxLines: 6 });
+
+    assert.ok(result.includes('\x1b[35m'), 'active goal accent should survive width truncation');
+    assert.ok(stripSgr(result).split('\n').length <= 3);
+  });
+
+  it('clamps active ultragoal output to the adaptive max even when callers request more lines', () => {
+    const ctx = {
+      ...emptyCtx(),
+      ralplan: { active: true, current_phase: 'review' },
+      ultraqa: { active: true, current_phase: 'adversarial-e2e' },
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 2,
+        complete: 0,
+        pending: 1,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 2,
+        activeGoal: {
+          id: 'G001-active',
+          title: 'Active HUD work',
+          objective: 'keep active summary compact',
+          status: 'in_progress',
+          index: 1,
+        },
+      },
+    };
+
+    const result = renderHud(ctx, 'focused', { maxWidth: 40, maxLines: 6 });
+
+    assert.ok(result.split('\n').length <= 3);
+  });
+
+  it('renders active ultragoal progress and title in English', () => {
+    const ctx = {
+      ...emptyCtx(),
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 5,
+        complete: 2,
+        pending: 2,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 5,
+        activeGoal: {
+          id: 'G003-tests',
+          title: 'HUD progress display',
+          objective: 'show active ultragoal objective in OMX HUD',
+          status: 'in_progress',
+          index: 3,
+        },
+      },
+      metrics: { total_turns: 12, session_turns: 12, last_activity: '' },
+    };
+
+    const result = stripSgr(renderHud(ctx, 'focused'));
+
+    assert.ok(result.includes('ultragoal 2/5 ▶ G003-tests: HUD progress display'));
+    assert.ok(!result.includes('objective: show active ultragoal objective in OMX HUD'));
+    assert.ok(!result.includes('목표'));
+  });
+
+  it('omits ultragoal when null', () => {
+    const result = renderHud(emptyCtx(), 'focused');
+    assert.ok(!result.includes('ultragoal'));
+  });
+
+  it('defaults no-ultragoal rendering to the compact line budget', () => {
+    const result = renderHud({
+      ...emptyCtx(),
+      gitBranch: 'feature/adaptive-hud-line-budget-with-a-very-long-name',
+      ralplan: { active: true, current_phase: 'consensus-complete' },
+      ultraqa: { active: true, current_phase: 'adversarial-verification' },
+      metrics: { total_turns: 100, session_turns: 12, last_activity: '', session_total_tokens: 125000 },
+      hudNotify: { turn_count: 12, last_turn_at: new Date().toISOString() },
+      session: { session_id: 'sess', started_at: new Date().toISOString() },
+    }, 'focused', { maxWidth: 80 });
+
+    assert.ok(!stripSgr(result).includes('ultragoal'));
+    assert.ok(result.split('\n').length <= 2);
+  });
+
+  it('combines active ultragoal and team into one non-duplicated focused summary', () => {
+    const ctx = {
+      ...emptyCtx(),
+      team: { active: true, agent_count: 4, team_name: 'hud-fix' },
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 4,
+        complete: 1,
+        pending: 2,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 4,
+        activeGoal: {
+          id: 'G002-team-hud',
+          title: 'Fix combined HUD rendering',
+          objective: 'avoid duplicate ultragoal and team HUD summaries',
+          status: 'in_progress',
+          index: 2,
+        },
+      },
+    };
+
+    const result = stripSgr(renderHud(ctx, 'focused', { maxWidth: 220, maxLines: 3 }));
+
+    assert.equal((result.match(/team:4 workers/g) ?? []).length, 1);
+    assert.equal((result.match(/ultragoal 1\/4/g) ?? []).length, 1);
+    assert.ok(result.includes('ultragoal 1/4 + team:4 workers ▶ G002-team-hud: Fix combined HUD rendering'));
+    assert.ok(!result.includes(' | team:4 workers | ultragoal'));
+    assert.ok(result.split('\n').length <= 3);
+  });
+
+  it('omits completed ultragoal plans instead of showing stale progress', () => {
+    const ctx = {
+      ...emptyCtx(),
+      ultragoal: {
+        active: false,
+        status: 'complete',
+        total: 2,
+        complete: 2,
+        pending: 0,
+        inProgress: 0,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 2,
+      },
+    };
+
+    const result = renderHud(ctx, 'focused');
+    assert.ok(!result.includes('ultragoal'));
+  });
+
+  it('truncates long ultragoal objectives', () => {
+    const longObjective = 'show active ultragoal objective in OMX HUD '.repeat(8);
+    const ctx = {
+      ...emptyCtx(),
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 1,
+        complete: 0,
+        pending: 0,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 1,
+        activeGoal: {
+          id: '',
+          title: '',
+          objective: longObjective,
+          status: 'in_progress',
+          index: 1,
+        },
+      },
+    };
+
+    const result = stripSgr(renderHud(ctx, 'focused'));
+    assert.ok(result.includes('objective: show active ultragoal objective in OMX HUD'));
+    assert.ok(result.includes('…'));
+    assert.ok(!result.includes(longObjective));
+  });
+
+  it('keeps long ultragoal title/objective summaries compact without duplicate ellipses', () => {
+    const repeatedText = 'Build example component with helper, install example package and app package on the target';
+    const ctx = {
+      ...emptyCtx(),
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 6,
+        complete: 0,
+        pending: 5,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 6,
+        activeGoal: {
+          id: 'G004-example-long-goal-id',
+          title: `${repeatedText}...`,
+          objective: `${repeatedText}, run diagnostics, and collect logs`,
+          status: 'in_progress',
+          index: 4,
+        },
+      },
+    };
+
+    const result = stripSgr(renderHud(ctx, 'focused', { maxWidth: 120, maxLines: 3 }));
+
+    assert.ok(result.includes('ultragoal 0/6 ▶ G004-example-long-goal-id: Build example component with helper…'));
+    assert.ok(!result.includes('objective:'));
+    assert.ok(!result.includes('...'));
+    assert.ok(!result.includes('……'));
+    assert.ok(result.split('\n').length <= 3);
+  });
+
+  it('renders active ultragoal and omits lower-priority pending items to protect compactness', () => {
+    const ctx = {
+      ...emptyCtx(),
+      ralplan: { active: true, current_phase: 'review' },
+      ultraqa: { active: true, current_phase: 'adversarial-e2e' },
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 5,
+        complete: 1,
+        pending: 3,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 5,
+        activeGoal: {
+          id: 'G002-active',
+          title: 'Active HUD status',
+          objective: 'show three active workflow statuses in the OMX HUD without clipping',
+          status: 'in_progress',
+          index: 2,
+        },
+        nextGoals: [
+          {
+            id: 'G003-next',
+            title: 'Next verification item',
+            objective: 'verify the HUD pane',
+            status: 'pending',
+            index: 3,
+          },
+          {
+            id: 'G004-qa',
+            title: 'Run UltraQA matrix',
+            objective: 'exercise adversarial scenarios',
+            status: 'pending',
+            index: 4,
+          },
+          {
+            id: 'G005-docs',
+            title: 'Document compact summary',
+            objective: 'document behavior',
+            status: 'pending',
+            index: 5,
+          },
+        ],
+      },
+    };
+
+    const result = stripSgr(renderHud(ctx, 'focused', { maxWidth: 260, maxLines: 6 }));
+
+    assert.ok(result.startsWith('[OMX]'));
+    assert.ok(result.includes('ralplan:review'));
+    assert.ok(result.includes('qa:adversarial-e2e'));
+    assert.ok(result.includes('G002-active: Active HUD status'));
+    assert.ok(!result.includes('G003-next: Next verification item (pending)'));
+    assert.ok(!result.includes('G004-qa: Run UltraQA matrix (pending)'));
+    assert.ok(!result.includes('G005-docs: Document compact summary (pending)'));
+    assert.ok(result.split('\n').length <= 3);
+  });
+
+  it('renders fewer pending ultragoal items without empty separators', () => {
+    const ctx = {
+      ...emptyCtx(),
+      ultragoal: {
+        active: true,
+        status: 'in_progress',
+        total: 2,
+        complete: 0,
+        pending: 1,
+        inProgress: 1,
+        failed: 0,
+        reviewBlocked: 0,
+        needsUserDecision: 0,
+        progressTotal: 2,
+        activeGoal: {
+          id: 'G001-active',
+          title: 'Active HUD work',
+          objective: 'keep active summary compact',
+          status: 'in_progress',
+          index: 1,
+        },
+        nextGoals: [{
+          id: 'G002-next',
+          title: 'Only next item',
+          objective: 'handle fewer pending goals',
+          status: 'pending',
+          index: 2,
+        }],
+      },
+    };
+
+    const result = stripSgr(renderHud(ctx, 'focused', { maxWidth: 180, maxLines: 3 }));
+
+    assert.ok(result.includes('G001-active: Active HUD work'));
+    assert.ok(!result.includes('G002-next: Only next item (pending)'));
+    assert.ok(!result.includes(' ·  · '));
+    assert.ok(!result.includes('objective:'));
   });
 });
 
@@ -615,7 +1064,7 @@ describe('renderHud – wrapping', () => {
     assert.ok(result.split('\n').length <= 5);
   });
 
-  it('caps wrapped HUD output at the requested max line count', () => {
+  it('caps wrapped HUD output at the adaptive no-ultragoal line count', () => {
     const ctx = {
       ...emptyCtx(),
       gitBranch: 'feature/very-long-branch-name',
@@ -639,7 +1088,7 @@ describe('renderHud – wrapping', () => {
       hudNotify: { last_turn_at: new Date().toISOString(), turn_count: 12 },
     };
     const result = stripSgr(renderHud(ctx, 'full', { maxWidth: 22, maxLines: 3 }));
-    assert.equal(result.split('\n').length, 3);
+    assert.equal(result.split('\n').length, 2);
     assert.ok(result.includes('…'));
   });
 });

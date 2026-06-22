@@ -49,6 +49,33 @@ describe('agents/definitions', () => {
     }
   });
 
+  it('defines the Prometheus Strict clean-room planner panel agents', () => {
+    const panel = [
+      AGENT_DEFINITIONS['prometheus-strict-metis'],
+      AGENT_DEFINITIONS['prometheus-strict-momus'],
+      AGENT_DEFINITIONS['prometheus-strict-oracle'],
+    ];
+
+    assert.deepEqual(panel.map((agent) => agent.name), [
+      'prometheus-strict-metis',
+      'prometheus-strict-momus',
+      'prometheus-strict-oracle',
+    ]);
+    assert.ok(panel.every((agent) => agent.category === 'coordination'));
+    assert.ok(panel.every((agent) => agent.routingRole === 'leader'));
+  });
+
+  it('defines the Scholastic ontology reviewer as a first-class coordination agent', () => {
+    const scholastic = AGENT_DEFINITIONS.scholastic;
+
+    assert.equal(scholastic.name, 'scholastic');
+    assert.equal(scholastic.category, 'coordination');
+    assert.equal(scholastic.routingRole, 'leader');
+    assert.equal(scholastic.modelClass, 'frontier');
+    assert.equal(scholastic.tools, 'read-only');
+    assert.match(scholastic.description, /Ontology-first reasoning reviewer/);
+  });
+
   it('keeps the installable agent model split aligned with the OMX subagent matrix', () => {
     assert.equal(AGENT_DEFINITIONS.architect.modelClass, 'frontier');
     assert.equal(AGENT_DEFINITIONS['security-reviewer'].modelClass, 'frontier');
@@ -72,5 +99,19 @@ describe('agents/definitions', () => {
       assert.equal(AGENT_DEFINITIONS[name].modelClass, 'standard');
       assert.equal(AGENT_DEFINITIONS[name].reasoningEffort, name === 'executor' ? 'medium' : 'high');
     }
+  });
+
+  it('pins ralplan thesis and antithesis to exact mini while keeping the critic frontier-gated', () => {
+    assert.equal(AGENT_DEFINITIONS.planner.exactModel, 'gpt-5.4-mini');
+    assert.equal(AGENT_DEFINITIONS.planner.reasoningEffort, 'high');
+    assert.equal(AGENT_DEFINITIONS.planner.modelClass, 'frontier');
+
+    assert.equal(AGENT_DEFINITIONS.architect.exactModel, 'gpt-5.4-mini');
+    assert.equal(AGENT_DEFINITIONS.architect.reasoningEffort, 'high');
+    assert.equal(AGENT_DEFINITIONS.architect.modelClass, 'frontier');
+
+    assert.equal(AGENT_DEFINITIONS.critic.exactModel, undefined);
+    assert.equal(AGENT_DEFINITIONS.critic.reasoningEffort, 'high');
+    assert.equal(AGENT_DEFINITIONS.critic.modelClass, 'frontier');
   });
 });

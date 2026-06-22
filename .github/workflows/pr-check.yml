@@ -7,6 +7,7 @@ on:
 jobs:
   size-label:
     name: PR Size Label
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -51,6 +52,7 @@ jobs:
 
   draft-check:
     name: Draft Check
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v9

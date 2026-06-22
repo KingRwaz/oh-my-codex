@@ -15,6 +15,10 @@ import { reconcileWorkflowTransition } from '../state/workflow-transition-reconc
 import { syncCanonicalSkillStateForMode } from '../state/skill-active.js';
 import { validateAndNormalizeRalphState } from '../ralph/contract.js';
 import { applyRunOutcomeContract } from '../runtime/run-outcome.js';
+import { validateAutopilotCompletionTransition } from '../autopilot/completion-gate.js';
+import { canAdvanceAutopilotDeepInterviewToRalplan, buildAutopilotDeepInterviewRalplanGateError } from '../autopilot/deep-interview-gate.js';
+import { canAdvanceAutopilotRalplanToUltragoal, buildAutopilotRalplanUltragoalGateError } from '../autopilot/ralplan-gate.js';
+import { deriveAutopilotChildPhase, type AutopilotChildPhase } from '../autopilot/fsm.js';
 import { syncRunStateFromModeState } from '../runtime/run-state.js';
 import {
   getAuthoritativeActiveStatePaths,
@@ -45,11 +49,48 @@ export type ModeName = 'autopilot' | 'autoresearch' | 'deep-interview' | 'ralph'
 /** @deprecated These mode names were removed in v4.6. Use the canonical modes instead. */
 export type DeprecatedModeName = 'ultrapilot' | 'pipeline' | 'ecomode';
 
+export interface UpdateModeStateOptions {
+  trustedPipelineProgress?: boolean;
+}
+
 const DEPRECATED_MODES: Record<DeprecatedModeName, string> = {
   ultrapilot: 'Use "team" instead. ultrapilot has been merged into team mode.',
   pipeline: 'Use "team" instead. pipeline has been merged into team mode.',
   ecomode: 'Use "ultrawork" instead. ecomode has been merged into ultrawork mode.',
 };
+
+const AUTOPILOT_CHILD_PHASE_ORDER: AutopilotChildPhase[] = [
+  'deep-interview',
+  'ralplan',
+  'ultragoal',
+  'rework',
+  'team',
+  'ralph',
+  'code-review',
+  'ultraqa',
+];
+
+function autopilotPhaseOrder(phase: AutopilotChildPhase | null): number {
+  return phase ? AUTOPILOT_CHILD_PHASE_ORDER.indexOf(phase) : -1;
+}
+
+function isForwardAutopilotPhase(
+  currentPhase: AutopilotChildPhase | null,
+  nextPhase: AutopilotChildPhase | null,
+): boolean {
+  const currentOrder = autopilotPhaseOrder(currentPhase);
+  const nextOrder = autopilotPhaseOrder(nextPhase);
+  return currentOrder >= 0 && nextOrder > currentOrder;
+}
+
+function isNextAutopilotPhase(
+  currentPhase: AutopilotChildPhase | null,
+  nextPhase: AutopilotChildPhase | null,
+): boolean {
+  const currentOrder = autopilotPhaseOrder(currentPhase);
+  const nextOrder = autopilotPhaseOrder(nextPhase);
+  return currentOrder >= 0 && nextOrder === currentOrder + 1;
+}
 
 /**
  * Check if a mode name is deprecated and return a warning message if so.
@@ -236,6 +277,7 @@ export async function updateModeState(
   updates: Partial<ModeState>,
   projectRoot?: string,
   explicitSessionId?: string,
+  options: UpdateModeStateOptions = {},
 ): Promise<ModeState> {
   const scope = await resolveStateScope(projectRoot, explicitSessionId);
   const baseStateDir = getBaseStateDir(projectRoot);
@@ -252,6 +294,7 @@ export async function updateModeState(
   }
 
   const updatedBase = { ...current, ...updates };
+  delete updatedBase.trustedPipelineProgress;
   if (!Object.prototype.hasOwnProperty.call(updates, 'run_outcome')) {
     delete updatedBase.run_outcome;
   }
@@ -259,6 +302,58 @@ export async function updateModeState(
     updatedBase.owner_omx_session_id = scope.sessionId;
   }
   const normalizedBase = normalizeModeStateOrThrow(mode, updatedBase as ModeState);
+  if (mode === 'autopilot') {
+    const isPipelineOrchestratorProgressWrite = options.trustedPipelineProgress === true;
+    const currentAutopilotChildPhase = deriveAutopilotChildPhase({ ...current, mode: 'autopilot' });
+    const nextAutopilotChildPhase = deriveAutopilotChildPhase({ ...normalizedBase, mode: 'autopilot' });
+    const completionTransitionError = validateAutopilotCompletionTransition(
+      current as Record<string, unknown>,
+      normalizedBase as Record<string, unknown>,
+      { allowUnknownActivePhaseCompletion: options.trustedPipelineProgress === true },
+    );
+    if (completionTransitionError) throw new Error(completionTransitionError);
+    if (!isPipelineOrchestratorProgressWrite) {
+      if (
+        currentAutopilotChildPhase === 'deep-interview'
+        && isForwardAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+        && !isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+      ) {
+        throw new Error('Cannot skip Autopilot ralplan gate: deep-interview may only advance to ralplan.');
+      }
+      if (
+        currentAutopilotChildPhase === 'deep-interview'
+        && isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+      ) {
+        const gate = await canAdvanceAutopilotDeepInterviewToRalplan({
+          cwd: projectRoot ?? process.cwd(),
+          sessionId: scope.sessionId,
+          baseStateDir,
+          currentState: current as Record<string, unknown>,
+          nextState: normalizedBase as Record<string, unknown>,
+        });
+        if (!gate.allowed) throw new Error(buildAutopilotDeepInterviewRalplanGateError(gate));
+      }
+      if (
+        currentAutopilotChildPhase === 'ralplan'
+        && isForwardAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+        && !isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+      ) {
+        throw new Error('Cannot skip Autopilot ultragoal gate: ralplan may only advance to ultragoal.');
+      }
+      if (
+        currentAutopilotChildPhase === 'ralplan'
+        && isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+      ) {
+        const gate = canAdvanceAutopilotRalplanToUltragoal({
+          cwd: projectRoot ?? process.cwd(),
+          sessionId: scope.sessionId,
+          currentState: current as Record<string, unknown>,
+          nextState: normalizedBase as Record<string, unknown>,
+        });
+        if (!gate.allowed) throw new Error(buildAutopilotRalplanUltragoalGateError(gate));
+      }
+    }
+  }
   const updated = withModeRuntimeContext(current, normalizedBase) as ModeState;
   await writeFile(getStatePath(mode, projectRoot, scope.sessionId), JSON.stringify(updated, null, 2));
   await syncRunStateFromModeState(updated, projectRoot, scope.sessionId);

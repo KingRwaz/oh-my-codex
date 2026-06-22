@@ -24,6 +24,7 @@ jobs:
             const {
               buildMaintainerCloseComment,
               collectLinkedLocalIssueNumbers,
+              postMergedPrFollowUpComment,
             } = require('./.github/scripts/dev-merge-issue-close.cjs');
 
             const pullRequest = context.payload.pull_request;
@@ -84,5 +85,14 @@ jobs:
               core.notice('No open issues required closing.');
               return;
             }
+
+            await postMergedPrFollowUpComment({
+              github,
+              core,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              prNumber: pullRequest.number,
+              issueNumbers: closedIssueNumbers,
+            });
 
             core.notice(`Closed linked issues after merge to dev: ${closedIssueNumbers.map((issueNumber) => `#${issueNumber}`).join(', ')}`);

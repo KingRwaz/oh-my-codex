@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { collectSidecarSnapshot, readTailText } from '../collector.js';
+import { resolveCanonicalTeamStateRoot } from '../../team/state-root.js';
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -169,5 +170,69 @@ describe('collectSidecarSnapshot', () => {
       assert.ok(snapshot);
       assert.deepEqual(snapshot.events.map((event) => event.event_id), ['e28', 'e29', 'e30']);
     });
+  });
+});
+
+describe('collectSidecarSnapshot canonical Team state root parity', () => {
+  async function withBoxedTeam(
+    envKey: 'OMX_ROOT' | 'OMX_STATE_ROOT',
+    test: (params: { cwd: string; env: NodeJS.ProcessEnv; boxedRoot: string }) => Promise<void>,
+  ): Promise<void> {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-sidecar-boxed-'));
+    try {
+      const boxedRoot = join(cwd, 'box');
+      const env = { [envKey]: boxedRoot } as NodeJS.ProcessEnv;
+      const teamRoot = join(resolveCanonicalTeamStateRoot(cwd, env), 'team', 'demo');
+      await mkdir(teamRoot, { recursive: true });
+      await writeJson(join(teamRoot, 'config.json'), {
+        name: 'demo',
+        task: 'ship sidecar',
+        tmux_session: 'omx-demo',
+        workers: [{ name: 'worker-1', index: 1, role: 'executor' }],
+      });
+      await test({ cwd, env, boxedRoot });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }
+
+  it('resolves sidecar team state under OMX_ROOT like the Team runtime', async () => {
+    await withBoxedTeam('OMX_ROOT', async ({ cwd, env, boxedRoot }) => {
+      assert.equal(resolveCanonicalTeamStateRoot(cwd, env), join(boxedRoot, '.omx', 'state'));
+      const snapshot = await collectSidecarSnapshot('demo', { cwd, env, now: new Date('2026-04-27T02:01:00.000Z') });
+      assert.ok(snapshot, 'sidecar must read team state from the canonical OMX_ROOT location');
+      assert.equal(snapshot.team_name, 'demo');
+    });
+  });
+
+  it('resolves sidecar team state under OMX_STATE_ROOT like the Team runtime', async () => {
+    await withBoxedTeam('OMX_STATE_ROOT', async ({ cwd, env, boxedRoot }) => {
+      assert.equal(resolveCanonicalTeamStateRoot(cwd, env), join(boxedRoot, '.omx', 'state'));
+      const snapshot = await collectSidecarSnapshot('demo', { cwd, env, now: new Date('2026-04-27T02:01:00.000Z') });
+      assert.ok(snapshot, 'sidecar must read team state from the canonical OMX_STATE_ROOT location');
+      assert.equal(snapshot.team_name, 'demo');
+    });
+  });
+
+  it('still honors OMX_TEAM_STATE_ROOT precedence over OMX_ROOT', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-sidecar-precedence-'));
+    try {
+      const teamStateRoot = join(cwd, 'explicit-team-state');
+      const env = { OMX_TEAM_STATE_ROOT: teamStateRoot, OMX_ROOT: join(cwd, 'box') } as NodeJS.ProcessEnv;
+      const teamRoot = join(teamStateRoot, 'team', 'demo');
+      await mkdir(teamRoot, { recursive: true });
+      await writeJson(join(teamRoot, 'config.json'), {
+        name: 'demo',
+        task: 'ship sidecar',
+        tmux_session: 'omx-demo',
+        workers: [{ name: 'worker-1', index: 1, role: 'executor' }],
+      });
+      assert.equal(resolveCanonicalTeamStateRoot(cwd, env), teamStateRoot);
+      const snapshot = await collectSidecarSnapshot('demo', { cwd, env, now: new Date('2026-04-27T02:01:00.000Z') });
+      assert.ok(snapshot, 'OMX_TEAM_STATE_ROOT must win over OMX_ROOT for sidecar lookup');
+      assert.equal(snapshot.team_name, 'demo');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });

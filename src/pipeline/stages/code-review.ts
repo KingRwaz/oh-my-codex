@@ -33,7 +33,10 @@ export interface CodeReviewVerdict {
   architectural_status: 'CLEAR' | 'WATCH' | 'BLOCK';
   clean: boolean;
   summary: string;
+  stage: 'code-review';
+  artifact_path: string;
 }
+
 
 export function createCodeReviewStage(options: CodeReviewStageOptions = {}): PipelineStage {
   return {
@@ -62,6 +65,8 @@ export function createCodeReviewStage(options: CodeReviewStageOptions = {}): Pip
         summary: options.summary ?? (hasReviewEvidence
           ? (clean ? 'Review clean.' : 'Review returned findings; return to ralplan.')
           : 'Code-review evidence missing; fail closed and return to ralplan.'),
+        stage: 'code-review',
+        artifact_path: '.omx/state/autopilot-state.json#pipeline_stage_results.code-review.artifacts.review_verdict',
       };
 
       return {

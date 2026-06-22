@@ -7,8 +7,8 @@ import {
 } from '../explore-routing.js';
 
 describe('explore-routing', () => {
-  it('defaults USE_OMX_EXPLORE_CMD to enabled and only disables explicit opt-out values', () => {
-    assert.equal(isExploreCommandRoutingEnabled({}), true);
+  it('defaults USE_OMX_EXPLORE_CMD to disabled compatibility mode and honors explicit values', () => {
+    assert.equal(isExploreCommandRoutingEnabled({}), false);
     assert.equal(isExploreCommandRoutingEnabled({ USE_OMX_EXPLORE_CMD: '1' }), true);
     assert.equal(isExploreCommandRoutingEnabled({ USE_OMX_EXPLORE_CMD: 'true' }), true);
     assert.equal(isExploreCommandRoutingEnabled({ USE_OMX_EXPLORE_CMD: 'yes' }), true);
@@ -34,17 +34,12 @@ describe('explore-routing', () => {
     assert.equal(isSimpleExplorationPrompt('investigate everything in this repo'), false);
   });
 
-  it('builds advisory guidance whenever routing is not explicitly disabled', () => {
-    const guidance = buildExploreRoutingGuidance({});
-    assert.match(guidance, /USE_OMX_EXPLORE_CMD/);
-    assert.match(guidance, /default-on; opt out/i);
-    assert.match(guidance, /agents SHOULD treat `omx explore` as the default first stop/i);
-    assert.match(guidance, /use `omx explore` FIRST before attempting full code analysis/i);
-    assert.match(guidance, /Explore examples:/);
-    assert.match(guidance, /SparkShell examples:/);
-    assert.match(guidance, /--prompt-file/);
-    assert.match(guidance, /shell-only allowlisted read-only path/i);
-    assert.match(guidance, /gracefully fall back to the normal path/i);
-    assert.equal(buildExploreRoutingGuidance({ USE_OMX_EXPLORE_CMD: 'off' }), '');
+  it('builds repository-lookup routing guidance without referencing the removed explore command', () => {
+    const guidance = buildExploreRoutingGuidance();
+    assert.ok(guidance.startsWith('**Repository Lookup Routing:**'));
+    assert.match(guidance, /normal Codex repository inspection/i);
+    assert.match(guidance, /omx sparkshell -- <command>/);
+    assert.doesNotMatch(guidance, /omx explore/i);
+    assert.doesNotMatch(guidance, /USE_OMX_EXPLORE_CMD/);
   });
 });

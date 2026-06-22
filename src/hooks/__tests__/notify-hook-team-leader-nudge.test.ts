@@ -130,6 +130,31 @@ shift || true
 if [[ "$cmd" == "display-message" ]]; then
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -152,6 +177,31 @@ echo "$@" >> "${tmuxLogPath}"
 cmd="$1"
 shift || true
 if [[ "$cmd" == "display-message" ]]; then
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -357,14 +407,18 @@ describe('notify-hook team leader nudge', () => {
       const fakeBinDir = join(cwd, 'fake-bin');
       const fakeTmuxPath = join(fakeBinDir, 'tmux');
       const tmuxLogPath = join(cwd, 'tmux.log');
+      const sessionId = 'sess-deep-interview-suppressed';
 
       await mkdir(logsDir, { recursive: true });
       await mkdir(mailboxDir, { recursive: true });
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
       await mkdir(fakeBinDir, { recursive: true });
-      await writeJson(join(stateDir, 'deep-interview-state.json'), {
+      await writeJson(join(stateDir, 'session.json'), { session_id: sessionId });
+      await writeJson(join(stateDir, 'sessions', sessionId, 'deep-interview-state.json'), {
         active: true,
         mode: 'deep-interview',
         current_phase: 'deep-interview',
+        session_id: sessionId,
       });
       await writeJson(join(stateDir, 'team-state.json'), {
         active: true,
@@ -389,7 +443,7 @@ describe('notify-hook team leader nudge', () => {
       await chmod(fakeTmuxPath, 0o755);
 
       const result = runNotifyHook(cwd, fakeBinDir, {
-        OMX_SESSION_ID: 'sess-canonical-missing',
+        OMX_SESSION_ID: sessionId,
       });
       assert.equal(result.status, 0, `notify-hook failed: ${result.stderr || result.stdout}`);
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8').catch(() => '');
@@ -760,6 +814,39 @@ describe('notify-hook team leader nudge', () => {
     });
   });
 
+  it('does not let stale root deep-interview state suppress session-scoped leader nudges', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const fakeTmuxPath = join(fakeBinDir, 'tmux');
+      const tmuxLogPath = join(cwd, 'tmux.log');
+      const sessionId = 'sess-stale-root-deep-interview';
+      const stateDir = join(cwd, '.omx', 'state');
+
+      await mkdir(fakeBinDir, { recursive: true });
+      await writeCanonicalTeamFixture(cwd, {
+        teamName: 'stale-root-di',
+        sessionId,
+        ownerSessionId: sessionId,
+      });
+      await writeJson(join(stateDir, 'deep-interview-state.json'), {
+        active: true,
+        current_phase: 'intent-first',
+        session_id: 'other-session',
+      });
+      await writeFile(fakeTmuxPath, buildFakeTmux(tmuxLogPath));
+      await chmod(fakeTmuxPath, 0o755);
+
+      const result = runNotifyHook(cwd, fakeBinDir, {
+        OMX_SESSION_ID: sessionId,
+      });
+      assert.equal(result.status, 0, `notify-hook failed: ${result.stderr || result.stdout}`);
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.match(tmuxLog, /send-keys/);
+      assert.match(tmuxLog, /\[OMX\] All 2 workers idle/, 'session-scoped nudge should ignore stale root deep-interview state');
+    });
+  });
+
   it('falls back to canonical team state when coarse team-state is inactive', async () => {
     await withTempWorkingDir(async (cwd) => {
       const fakeBinDir = join(cwd, 'fake-bin');
@@ -990,6 +1077,31 @@ OpenAI Codex
 • Working… (esc to interrupt)
 ›
 EOF
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -1297,6 +1409,31 @@ if [[ "$cmd" == "display-message" ]]; then
   fi
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -1391,6 +1528,31 @@ if [[ "$cmd" == "display-message" ]]; then
 fi
 if [[ "$cmd" == "capture-pane" ]]; then
   printf "• Running tests (3m 12s • esc to interrupt)\\n"
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -1496,6 +1658,31 @@ if [[ "$cmd" == "capture-pane" ]]; then
   echo "capture failed" >&2
   exit 1
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -1592,6 +1779,31 @@ if [[ "$cmd" == "capture-pane" ]]; then
   cat <<'EOF'
 Team same-classified-state: 1 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown same-classified-state.
 EOF
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -1693,6 +1905,31 @@ if [[ "$cmd" == "display-message" ]]; then
     echo "codex"
     exit 0
   fi
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then

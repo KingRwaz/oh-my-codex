@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import {
   CodexGoalSnapshotError,
   formatCodexGoalReconciliation,
+  buildCodexGoalTerminalCleanupNotice,
   readCodexGoalSnapshotInput,
   reconcileCodexGoalSnapshot,
 } from '../goal-workflows/codex-goal-snapshot.js';
@@ -134,6 +135,10 @@ function printStatus(plan: Awaited<ReturnType<typeof readUltragoalPlan>>): void 
   if (summary.aggregateComplete) {
     console.log('ultragoal aggregate product: complete');
     console.log(`microgoal ledger bookkeeping (progress-only): ${summary.complete}/${summary.total} complete, ${summary.pending} pending, ${summary.inProgress} in progress, ${summary.failed} failed, ${summary.reviewBlocked} review-blocked, ${summary.needsUserDecision} needs-user-decision`);
+  } else if (summary.artifactComplete) {
+    console.log('ultragoal artifact goals: complete');
+    console.log(`codex goal reconciliation: not recorded in OMX aggregateCompletion; status is artifact-backed until a fresh Codex goal snapshot is available.`);
+    console.log(`microgoal ledger: ${summary.complete}/${summary.total} complete, ${summary.pending} pending, ${summary.inProgress} in progress, ${summary.failed} failed, ${summary.reviewBlocked} review-blocked, ${summary.needsUserDecision} needs-user-decision`);
   } else {
     console.log(`ultragoal: ${summary.complete}/${summary.total} complete, ${summary.pending} pending, ${summary.inProgress} in progress, ${summary.failed} failed, ${summary.reviewBlocked} review-blocked, ${summary.needsUserDecision} needs-user-decision`);
   }
@@ -284,6 +289,36 @@ function printSteerResult(proposal: UltragoalSteeringProposal, result: CliSteerR
   printStatus(result.plan);
 }
 
+const ULTRAGOAL_MUTATING_COMMANDS = new Set([
+  'create',
+  'create-goals',
+  'add-goal',
+  'steer',
+  'record-review-blockers',
+  'complete',
+  'complete-goals',
+  'next',
+  'start-next',
+  'checkpoint',
+]);
+
+function readTeamWorkerIdentity(env: NodeJS.ProcessEnv = process.env): string | null {
+  const publicIdentity = typeof env.OMX_TEAM_WORKER === 'string' ? env.OMX_TEAM_WORKER.trim() : '';
+  if (publicIdentity) return publicIdentity;
+  const internalIdentity = typeof env.OMX_TEAM_INTERNAL_WORKER === 'string' ? env.OMX_TEAM_INTERNAL_WORKER.trim() : '';
+  return internalIdentity || null;
+}
+
+function assertUltragoalMutationAllowedFromCurrentProcess(command: string): void {
+  if (!ULTRAGOAL_MUTATING_COMMANDS.has(command)) return;
+  const workerIdentity = readTeamWorkerIdentity();
+  if (!workerIdentity) return;
+  throw new UltragoalError(
+    `Refusing mutating ultragoal command "${command}" from Team worker ${workerIdentity}. `
+    + 'Ultragoal state is leader-owned; workers must report checkpoint evidence upward instead of mutating .omx/ultragoal.',
+  );
+}
+
 export async function ultragoalCommand(args: string[]): Promise<void> {
   const command = args[0] ?? 'help';
   const rest = args.slice(1);
@@ -295,6 +330,8 @@ export async function ultragoalCommand(args: string[]): Promise<void> {
       console.log(ULTRAGOAL_HELP);
       return;
     }
+
+    assertUltragoalMutationAllowedFromCurrentProcess(command);
 
     if (command === 'create' || command === 'create-goals') {
       const briefFile = readValue(rest, '--brief-file');
@@ -327,17 +364,25 @@ export async function ultragoalCommand(args: string[]): Promise<void> {
       const expectedObjective = plan.codexGoalMode === 'aggregate'
         ? plan.codexObjective
         : activeGoal?.objective;
-      const reconciliation = activeGoal
+      const reconciliation = activeGoal || snapshot
         ? reconcileCodexGoalSnapshot(snapshot, {
-          expectedObjective: expectedObjective ?? activeGoal.objective,
+          expectedObjective: expectedObjective ?? plan.codexObjective ?? '',
           acceptedObjectives: plan.codexGoalMode === 'aggregate' ? plan.codexObjectiveAliases : undefined,
-          allowedStatuses: plan.codexGoalMode === 'aggregate' ? ['active'] : ['active', 'complete'],
+          allowedStatuses: activeGoal && plan.codexGoalMode === 'aggregate' ? ['active'] : ['active', 'complete'],
           requireSnapshot: false,
         })
         : null;
-      if (json) printJson({ plan, summary: summarizeUltragoalPlan(plan), reconciliation });
+      const codexGoalFallback = reconciliation?.snapshot.unavailableReason === 'db_schema_context_error'
+        ? {
+          status: 'codex_goal_reconciliation_unavailable',
+          reason: reconciliation.snapshot.unavailableReason,
+          message: 'Codex goal DB/schema/context is unavailable; artifact-backed Ultragoal status remains available, but strict Codex goal completion reconciliation is deferred.',
+        }
+        : undefined;
+      if (json) printJson({ plan, summary: summarizeUltragoalPlan(plan), reconciliation, codexGoalFallback });
       else {
         printStatus(plan);
+        if (codexGoalFallback) console.log(`codex goal fallback: ${codexGoalFallback.message}`);
         if (reconciliation && !reconciliation.ok) console.log(`codex goal warning: ${formatCodexGoalReconciliation(reconciliation)}`);
         else if (reconciliation?.warnings.length) console.log(`codex goal warning: ${formatCodexGoalReconciliation(reconciliation)}`);
       }
@@ -442,6 +487,10 @@ export async function ultragoalCommand(args: string[]): Promise<void> {
         const goal = plan.goals.find((candidate: UltragoalItem) => candidate.id === goalId);
         console.log(`ultragoal checkpoint: ${goalId} -> ${goal?.status ?? status}`);
         printStatus(plan);
+        const summary = summarizeUltragoalPlan(plan);
+        if (status === 'complete' && (summary.aggregateComplete || summary.artifactComplete)) {
+          console.log(buildCodexGoalTerminalCleanupNotice('Ultragoal completion'));
+        }
       }
       return;
     }

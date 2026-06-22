@@ -325,6 +325,11 @@ function tokenizeShellCommandWithBoundaries(commandText: string): ShellToken[] |
   let quote: "'" | "\"" | null = null;
   let escaping = false;
   let nextTokenStartsCommand = false;
+  // Command substitution executes even inside double quotes, so we track an
+  // active `"$(…)"` (paren depth) or `` "`…`" `` (backtick) substitution to
+  // restore double-quote mode once it closes.
+  let dquoteSubstParenDepth = 0;
+  let backtickFromDquote = false;
 
   const pushCurrent = () => {
     if (!current) return;
@@ -357,6 +362,25 @@ function tokenizeShellCommandWithBoundaries(commandText: string): ShellToken[] |
         if (isDoubleQuotedShellEscapeTarget(trimmed[index + 1])) escaping = true;
         else current += char;
       }
+      // Command substitution runs inside double quotes, so `"$(cmd …)"` and
+      // `` "`cmd …`" `` are real invocations, not literal mentions. Treat the
+      // opener as a command-position boundary and parse the substitution body
+      // unquoted so the command-head walk resumes, then restore double-quote
+      // mode when it closes. Parameter expansion (`${VAR}`), `$HOME`, and an
+      // escaped `\$(` stay literal text (no false positive on `grep "(x"`).
+      else if (char === "$" && trimmed[index + 1] === "(") {
+        pushCurrent();
+        nextTokenStartsCommand = true;
+        index += 1;
+        dquoteSubstParenDepth = 1;
+        quote = null;
+      }
+      else if (char === "`") {
+        pushCurrent();
+        nextTokenStartsCommand = true;
+        backtickFromDquote = true;
+        quote = null;
+      }
       else current += char;
       continue;
     }
@@ -365,6 +389,48 @@ function tokenizeShellCommandWithBoundaries(commandText: string): ShellToken[] |
       pushCurrent();
       nextTokenStartsCommand = true;
       if ((char === "&" || char === "|") && trimmed[index + 1] === char) index += 1;
+      continue;
+    }
+
+    // Grouping / command-substitution openers act as command-position
+    // boundaries so the command-head walk resumes after them, mirroring the
+    // legacy `[\n;&|(]` boundary set. This catches a real command immediately
+    // after `(`, `((`, `$(` (command substitution), or a backtick — e.g.
+    // `(apply_patch …)`, `true | (apply_patch …)`, `x=$(apply_patch …)`. We
+    // are outside quotes here, so a literal like `grep "(apply_patch"` is left
+    // intact and not split.
+    // Closing backtick of a command substitution opened inside double quotes
+    // ends the substitution and restores the surrounding double-quoted literal.
+    if (char === "`" && backtickFromDquote) {
+      pushCurrent();
+      backtickFromDquote = false;
+      quote = "\"";
+      continue;
+    }
+
+    if (char === "(" || char === ")" || char === "`") {
+      pushCurrent();
+      nextTokenStartsCommand = true;
+      // Track paren depth of a `"$(…)"` substitution opened inside double
+      // quotes so the matching `)` restores double-quote mode (nested `$(`
+      // and `(` inside it are balanced before we return to the literal).
+      if (dquoteSubstParenDepth > 0) {
+        if (char === "(") {
+          dquoteSubstParenDepth += 1;
+        } else if (char === ")") {
+          dquoteSubstParenDepth -= 1;
+          if (dquoteSubstParenDepth === 0) quote = "\"";
+        }
+      }
+      continue;
+    }
+
+    // `{` is a group opener only as its own word (`{ apply_patch …; }`):
+    // require an empty pending token (preceded by start/whitespace/boundary)
+    // and a following whitespace/newline so brace expansion (`{a,b}`) and
+    // parameter expansion (`${VAR}`) are left intact.
+    if (char === "{" && current === "" && /\s/.test(trimmed[index + 1] ?? " ")) {
+      nextTokenStartsCommand = true;
       continue;
     }
 
@@ -486,6 +552,77 @@ function findGitCommandTokenIndex(tokens: ShellToken[]): number {
   }
 
   return -1;
+}
+
+const APPLY_PATCH_COMMAND_WRAPPER_TOKENS = new Set(["sudo", "command", "exec"]);
+
+// Detects a real `apply_patch` invocation at a shell command position using the
+// same tokenized command-head walk the git commit guard uses
+// (`findGitCommandTokenIndex`): after every statement boundary skip leading
+// inline `NAME=VALUE` assignments, the `env` executable with its full option
+// grammar (`-i`/`--ignore-environment`, `-u`/`--unset`/`--unset=`, `-C`/`-S`,
+// `--`, interleaved assignments), and `sudo`/`command`/`exec` wrappers — in any
+// order — then match when the resolved command token's basename is
+// `apply_patch`. This blocks path-qualified (`/usr/bin/apply_patch`,
+// `./apply_patch`), env-flag (`env -i apply_patch`, `env -u FOO apply_patch`),
+// and reordered (`FOO=bar env apply_patch`, `exec env FOO=bar apply_patch`)
+// forms, while read-only diagnostics that merely mention the literal token
+// (e.g. `grep -n "apply_patch" file`) are not misread as write intent. Heredoc
+// bodies are stripped first so patch payloads cannot break tokenization.
+export function commandInvokesApplyPatch(command: string): boolean {
+  const tokens = tokenizeShellCommandWithBoundaries(removeHereDocBodies(command));
+  if (!tokens) return false;
+
+  for (let commandStart = 0; commandStart < tokens.length; commandStart = nextCommandStart(tokens, commandStart)) {
+    let index = commandStart;
+    const commandEnd = nextCommandStart(tokens, commandStart);
+
+    let advanced = true;
+    while (advanced && index < commandEnd) {
+      advanced = false;
+
+      while (index < commandEnd && isInlineShellEnvAssignment(tokens[index]?.value ?? "")) {
+        index += 1;
+        advanced = true;
+      }
+
+      while (index < commandEnd && isEnvExecutableToken(tokens[index]?.value ?? "")) {
+        index += 1;
+        advanced = true;
+        while (index < commandEnd) {
+          const token = tokens[index]?.value ?? "";
+          if (token === "--") {
+            index += 1;
+            break;
+          }
+          if (isInlineShellEnvAssignment(token)) {
+            index += 1;
+            continue;
+          }
+          if (token === "-i" || token === "--ignore-environment" || token.startsWith("--unset=")) {
+            index += 1;
+            continue;
+          }
+          if (token.startsWith("-")) {
+            index += envOptionConsumesNextValue(token) ? 2 : 1;
+            continue;
+          }
+          break;
+        }
+      }
+
+      while (index < commandEnd && APPLY_PATCH_COMMAND_WRAPPER_TOKENS.has((tokens[index]?.value ?? "").toLowerCase())) {
+        index += 1;
+        advanced = true;
+      }
+    }
+
+    if (index < commandEnd && shellCommandBasename(tokens[index]?.value ?? "") === "apply_patch") return true;
+    if (commandEnd <= commandStart) break;
+    commandStart = commandEnd - 1;
+  }
+
+  return false;
 }
 
 function tokenValues(tokens: ShellToken[]): string[] {
@@ -1223,6 +1360,85 @@ function hasActionableBashHardFailure(normalized: NormalizedPostToolUsePayload):
   return containsHardFailure(`${normalized.stderrText}\n${normalized.stdoutText}`);
 }
 
+function isShellEnvAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(token);
+}
+
+function shellCommandBasename(token: string): string {
+  const normalized = token.replace(/\\/g, "/");
+  return (normalized.split("/").pop() || normalized).toLowerCase();
+}
+
+function skipEnvWrapper(tokens: string[]): number {
+  let index = 0;
+  while (isShellEnvAssignment(tokens[index] || "")) index += 1;
+  if (!isEnvExecutableToken(tokens[index] || "")) return index;
+
+  index += 1;
+  while (index < tokens.length) {
+    const token = tokens[index] || "";
+    if (token === "--") {
+      index += 1;
+      break;
+    }
+    if (isShellEnvAssignment(token)) {
+      index += 1;
+      continue;
+    }
+    if (envOptionConsumesNextValue(token)) {
+      index += 2;
+      continue;
+    }
+    if (token === "-i" || token === "--ignore-environment" || token.startsWith("-u") && token.length > 2) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return index;
+}
+
+function skipGhGlobalOptions(tokens: string[], startIndex: number): number {
+  let index = startIndex;
+  const optionsWithValue = new Set(["--repo", "-R", "--hostname", "--config-dir"]);
+  while (index < tokens.length) {
+    const token = tokens[index] || "";
+    if (optionsWithValue.has(token)) {
+      index += 2;
+      continue;
+    }
+    if (/^(?:--repo|--hostname|--config-dir)=/.test(token)) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-") && token !== "-") {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return index;
+}
+
+function isReviewableGhPrChecksTokens(tokens: string[]): boolean {
+  const commandIndex = skipEnvWrapper(tokens);
+  const basename = shellCommandBasename(tokens[commandIndex] || "");
+  if (basename !== "gh" && basename !== "gh.exe") return false;
+  const subcommandIndex = skipGhGlobalOptions(tokens, commandIndex + 1);
+  return tokens[subcommandIndex] === "pr" && tokens[subcommandIndex + 1] === "checks";
+}
+
+function isReviewableNonZeroBashCommand(command: string): boolean {
+  const boundaryTokens = tokenizeShellCommandWithBoundaries(removeHereDocBodies(command));
+  if (!boundaryTokens) return false;
+  for (let commandStart = 0; commandStart < boundaryTokens.length; commandStart = nextCommandStart(boundaryTokens, commandStart)) {
+    const commandEnd = nextCommandStart(boundaryTokens, commandStart);
+    const commandTokens = boundaryTokens.slice(commandStart, commandEnd).map((candidate) => candidate.value);
+    if (isReviewableGhPrChecksTokens(commandTokens)) return true;
+  }
+  return false;
+}
+
 export function buildNativePostToolUseOutput(
   payload: CodexHookPayload,
 ): Record<string, unknown> | null {
@@ -1264,6 +1480,7 @@ export function buildNativePostToolUseOutput(
     && normalized.exitCode !== 0
     && combined.length > 0
     && !containsHardFailure(combined)
+    && isReviewableNonZeroBashCommand(normalized.normalizedCommand)
   ) {
     return {
       decision: "block",

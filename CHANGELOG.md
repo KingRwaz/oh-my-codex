@@ -4,6 +4,352 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.18.14] - 2026-06-20
+
+Patch release for the post-`0.18.13` reliability train: agent/model routing diagnostics are clearer, goal/planning workflows are safer, plugin and native-hook behavior is sturdier, HUD/Team/tmux edge cases are tightened, doctor catches root-owned repo artifacts, and resume search discovers madmax run histories.
+
+### Changed
+
+- **Agent/model routing is more transparent** — per-agent model overrides and launch diagnostics expose selected roles, tiers, and launch arguments without changing the default CLI/package contract.
+- **Goal and planning workflow guidance is clearer** — completed Codex goal cleanup, Ralplan transition diagnostics, supervised Autopilot review rework, Beads metadata handling, and goal/skill docs reduce stale or ambiguous handoffs.
+- **Doctor and resume discovery cover more local cases** — root-owned repo artifact detection and madmax run-history discovery improve troubleshooting and continuation.
+
+### Fixed
+
+- **Plugin, setup, and native hooks are safer** — plugin AGENTS policy blocks survive setup, dev plugin cache diagnostics are clearer, bundled skill agent tier references are present, native hooks succeed on null output, PreToolUse stdout/schema behavior is preserved, and Windows native hook command launching avoids shell wrapping.
+- **HUD, Team, and tmux behavior is sturdier** — stale Autopilot HUD state, cramped guard rendering, standalone pane-scoped HUD state, paste-buffer cleanup, worker AGENTS guidance, and HUD pane ownership on shutdown are hardened.
+- **Ralplan and Autopilot gates are fresher** — Ralplan consensus approval/freshness checks, guard/HUD phase authority, stale Autopilot stop state, and Ultragoal architecture invariant handling are tightened.
+
+### PRs
+
+- #2912, #2906, #2905, #2900, #2899, #2897, #2896, #2895, #2894, #2889, #2888, #2884, #2879, #2878, #2877, #2875, #2874, #2873, #2861, #2859, #2852, #2850, #2848, #2828
+
+### Issues
+
+- Held open PRs #2902, #2856, #2840, #2839, and #2838 are excluded from this release candidate unless already in `origin/dev`; prep confirmed they are open and `BEHIND` on base `dev`.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.14.md`.
+
+## [0.18.13] - 2026-06-17
+
+Patch release for the post-`0.18.12` reliability train: project-scoped resume/search discovery is broader, setup and hook handling are safer, ralplan/autopilot consensus gates are fresher, CI/release infrastructure is sturdier, sidecar Team state roots align with runtime behavior, geobench documentation/schema fixes are captured, and release prep selects `0.18.13` rather than `0.19.0` after explicit no-breaking-change review.
+
+### Changed
+
+- **Project resume/search discovery is more complete** — project-scoped runtime Codex homes are included in `omx resume` and `omx session search`, with `--project` and `--codex-home` escape hatches documented for narrower or explicit lookup.
+- **CI and release infrastructure is sturdier** — workflows move to GitHub-hosted runners where appropriate, dev-merge issue-close follow-up comments are best-effort, and the `0.18.12` promotion topology is accounted for before preparing `0.18.13`.
+- **Geobench visibility is documented** — the curated geobench profile, visibility spec, romanization schema, and enriched profile schema are captured for repeatable benchmark configuration.
+
+### Fixed
+
+- **Setup, hooks, and transcript preservation are safer** — generated native-agent TOMLs preserve user customization, setup overwrite behavior is covered, hook JSON state compatibility is hardened, and project Codex transcripts survive cleanup.
+- **Ralplan and Autopilot gates are fresher** — consensus freshness checks, tracker-backed native reviews, target-aware write detection, and Autopilot ralplan handoff validation are tightened.
+- **Team sidecar state roots align with runtime behavior** — sidecar collection uses the Team runtime state root, reducing mismatched state inspection.
+
+### PRs
+
+- #2816, #2817, #2820, #2821, #2824, #2826, #2829, #2831, #2832, #2833, #2836, #2843, #2845, #2846
+
+### Issues
+
+- No open GitHub issues were present at release-scope review time; open PRs #2840, #2839, #2838, and draft #2828 were scoped as fix/docs/warning/safety follow-ups and did not change the `0.18.13` patch decision.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.13.md`.
+
+## [0.18.12] - 2026-06-12
+
+Patch release for the post-`0.18.11` release-prep train: first-party MCP sibling detection is narrower, manual npm publishing is documented in CI, runtime/HUD/plugin/autopilot safeguards are tightened, Windows hook and state-input paths are safer, and release prep reconciles the main workflow history for `0.18.12`.
+
+### Changed
+
+- **Release and publication workflow is clearer** — manual npm publication workflow support and npm auth configuration are captured, while `0.18.12` release prep reconciles the main workflow history without tagging, merging main, or publishing locally.
+- **Runtime and automation gates are stricter** — Autopilot final gates, best-practice-research read-only boundaries, ralplan consensus guards, and deep-interview patch artifact handling are hardened.
+- **Plugin and generated guidance handling is safer** — persistent AGENTS guidance, plugin agent merge repair, developer-instruction prompt policy, setup plugin mode inference, and cleanup preservation are tightened.
+
+### Fixed
+
+- **Windows and CLI state paths are safer** — Windows hook shims preserve `Path`, emit `omx.cmd`, use absolute PowerShell hook paths, handle UTF-8 BOM for non-ASCII installs, and `omx state` gains a Windows-safe input surface.
+- **HUD/session visibility is more reliable** — dev version labels, stale HUD cleanup, HUD owner matching, terminal skill-active visibility, cancel hook-visible run-dir state, and detached history pruning tolerate more edge cases.
+- **MCP sibling detection is narrower** — post-traffic first-party MCP sibling capping avoids overmatching unrelated same-parent processes.
+
+### PRs
+
+- #2760, #2762, #2765, #2766, #2768, #2771, #2773, #2774, #2776, #2798, #2800, #2801, #2802, #2805, #2806, #2810, #2812
+
+### Issues
+
+- No open GitHub issues or open PRs were present at release prep time; release scope is represented by the merged PR and direct-commit inventory in the release notes.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.12.md`.
+
+
+## [0.18.11] - 2026-06-09
+
+Patch release for the post-`0.18.10` cleanup train: the `omx explore` command surface is hard-deprecated, `omx doctor` gains Spark/model lane routing diagnostics, launch-time tmux HUD splitting is safer in cramped windows, and the catalog registers the wiki skill manifest entry.
+
+### Changed
+
+- **`omx explore` command surface is hard-deprecated** — the explore command surface is fully retired and remaining `omx explore` mentions are removed from global AGENTS guidance.
+- **Catalog gains the wiki skill manifest entry** — the wiki skill manifest entry is registered so the skill is discoverable through the standard manifest surface.
+
+### Fixed
+
+- **`omx doctor` surfaces Spark/model lane routing** — doctor adds a Spark/model lane routing diagnostic so misrouted model lanes are visible during diagnosis.
+- **Launch-time HUD is safer in cramped tmux windows** — the launch-time HUD split is skipped inside cramped existing tmux windows to avoid unusable pane splits during startup.
+
+### PRs
+
+- #2746, #2747, #2750, #2755, #2758
+
+### Issues
+
+- No separately closed GitHub issues were found for the `v0.18.10..HEAD` release range; the release scope is represented by the merged PR inventory above.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.11.md`.
+
+## [0.18.9] - 2026-06-03
+
+Patch release for the post-`0.18.8` update/runtime reliability train: stable/dev update channels, source-install packaging, Windows npm fallback, project-local runtime state lookup, cmux/tmux question rendering, deep-interview visibility/grounding, Autopilot/Ultragoal/review gate clarity, HUD pane scoping, and CI/release evidence hardening.
+
+### Changed
+
+- **Update channels are clearer** — stable and dev update paths are explicit, dev-source updates produce installable package artifacts, and update behavior is safer across local checkouts.
+- **Autopilot, review, and Ultragoal gates are clearer** — ralplan write guards are phase-aware, review subagent model/effort choices are respected, and Ultragoal HUD stays active until goals finish.
+- **Release and CI evidence is tighter** — fork PR CI avoids self-hosted skips, self-hosted prerequisite install is hardened, and 0.18.8 release evidence cleanup is captured as internal release hygiene.
+
+### Fixed
+
+- **Question and deep-interview rendering is more robust** — `omx question` works under cmux/tmux shims via env prefix delivery, short panes keep deep-interview questions visible, and deep-interview handoffs are grounded in repo docs.
+- **Project-local state lookup is safer** — boxed `OMX_ROOT` project memory lookup and project-local resume history listing preserve the intended project context during isolated launches.
+- **HUD/update edge cases are covered** — repeated tmux HUD reconciliation stays scoped to the emitting pane, and Windows update global-root lookup falls back to `npm.cmd`.
+
+### PRs
+
+- #2713, #2711, #2710, #2709, #2708, #2706, #2704, #2703, #2702, #2699, #2697, #2693, #2691, #2690
+
+### Issues
+
+- No separately closed GitHub issues were found for the `v0.18.8..HEAD` release range; the release scope is represented by the merged PR inventory above.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.9.md`.
+
+## [0.18.8] - 2026-06-01
+
+Patch release for the post-`0.18.7` runtime reliability train: HUD/session ownership under native session drift, Autopilot replay and context-snapshot hardening, plugin hook/cache correctness, Team startup/disablement safety, native subagent guidance, and release/CI evidence improvements.
+
+### Changed
+
+- **HUD ownership is more session-authoritative** — source-pane scoping, resize-hook scoping, native session-id drift preservation, prompt-revive dedupe, and deleted-cwd safeguards reduce duplicate or stale HUD panes.
+- **Autopilot context and replay behavior is clearer** — terminal turn replay no longer reactivates completed Autopilot state, context snapshots are seeded/hardened, and task-seed provenance is documented.
+- **Team/native-agent guidance is tighter** — Team mode can be disabled, tmux worktree startup compatibility is fixed, native executor lanes stay leaf-only, and default native subagent routing guidance is corrected.
+- **Release and CI lanes are more explicit** — self-hosted Linux runner selection and GJC evidence lane optimization reduce avoidable broad CI churn.
+
+### Fixed
+
+- **Plugin hook cache and mirror behavior is safer** — stale hook cache refresh, setup-mode preservation, oversized Stop semantics, JSON fallback, and plugin hook metadata verification are protected.
+- **HUD edge cases are covered** — fallback authority respawn storms, escaped tmux separators, legacy focused panes, native session drift, and doctor panes for deleted cwd are handled.
+- **State and operator help improved** — state operation help and UltraQA temporary harness guidance are updated.
+
+### PRs
+
+- #2686, #2685, #2684, #2677, #2676, #2675, #2672, #2657, #2652, #2671, #2664, #2660, #2670, #2667, #2666, #2661, #2665, #2656, #2654, #2655, #2651, #2643, #2650, #2649, #2648, #2642, #2636, #2646, #2640, #2596
+
+### Issues
+
+- No separately closed GitHub issues were found for the `v0.18.7..HEAD` release range; the release scope is represented by the merged PR inventory above.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.8.md`.
+
+## [0.18.7] - 2026-05-29
+
+Patch release for the post-`0.18.6` runtime reliability train: duplicate HUD and question-renderer pane prevention, HUD ownership preservation across native tmux session replacement, Stop-hook duplicate suppression safety, Autopilot/ralplan gate hardening, Hermes MCP pane routing, and Team coordination protocol updates.
+
+### Changed
+
+- **HUD ownership is more durable** — native session replacement preserves HUD ownership metadata, attached tmux HUD rendering stays singleton, and HUD watch remains bound to its live tmux cwd.
+- **Planning and automation gates are stricter** — ralplan remains a planning-only boundary, Autopilot completion requires gate evidence, and command-style Autopilot invocations route through the intended path.
+- **Team coordination is documented and typed** — lightweight team coordination protocol docs, state, and tests landed for the worker runtime surface.
+
+### Fixed
+
+- **Duplicate HUD panes are prevented** — standalone HUD restore and attached tmux rendering reuse existing same-owner panes instead of spawning duplicates.
+- **Duplicate question/Stop UI paths are safer** — question renderer panes close after answers, duplicate renderer panes are prevented, and duplicate worker Stop nudges preserve recovery evidence.
+- **Hermes MCP and detached tmux behavior are safer** — Hermes MCP tmux bridge pane routing is fixed and detached tmux history growth is constrained.
+- **Gitignore handling is protected** — effective gitignore regression coverage was added for release-critical file discovery.
+
+### PRs
+
+- #2571, #2573, #2574, #2583, #2593, #2594, #2595, #2605, #2608, #2609, #2611
+
+### Issues
+
+- No separately closed GitHub issues were found for the `v0.18.6..HEAD` release range; the release scope is represented by the merged PR inventory above.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.7.md`.
+
+## [0.18.6] - 2026-05-27
+
+Patch release for the post-`0.18.5` Ultragoal/HUD rendering follow-up: adaptive HUD line budgets, tmux pane sizing from the same render policy, clearer current-Ultragoal accenting, ANSI-safe truncation, and watch-mode row-budget protection.
+
+### Changed
+
+- **Ultragoal HUD line budget is adaptive** — ordinary sessions keep the compact default while active Ultragoal state can use up to three bounded lines.
+- **HUD pane sizing follows render policy** — tmux reconcile/resize behavior now shares the Ultragoal-aware line-budget helper used by rendering.
+- **Current Ultragoal context is clearer** — the active goal uses a distinct magenta accent and compact output omits lower-priority next-goal text.
+
+### Fixed
+
+- **ANSI truncation is safer** — constrained-width truncation preserves ANSI styling.
+- **Watch-mode output respects the row budget** — watch rendering avoids adding an extra terminal row.
+
+### PRs
+
+- #2555
+
+### Issues
+
+- No separately closed GitHub issues were found for the `v0.18.5..HEAD` release range; the release scope is represented by the merged PR inventory above.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.6.md`.
+
+## [0.18.5] - 2026-05-27
+
+Patch release for the post-`0.18.4` Ultragoal/HUD operator-experience train: clearer Ultragoal status when Codex goal storage is unavailable, more readable and compact HUD summaries, duplicate HUD pane prevention, safer `omx question`/Autopilot user-decision handling, narrower doctor warnings, and mandatory independent final review evidence for Ultragoal completion.
+
+### Changed
+
+- **Ultragoal final review evidence is stricter** — final aggregate completion now requires independent code-reviewer and architect evidence before the Codex goal can be marked complete.
+- **Ultragoal HUD summaries are more useful** — HUD output is compact, avoids duplicate combined-state summaries, and can show next active/pending Ultragoal items instead of only the current line.
+- **Autopilot preserves operator decisions** — deep-interview question handling keeps explicit user decisions intact while waiting through `omx question`.
+
+### Fixed
+
+- **Ultragoal status handles unavailable Codex goal storage** — goal DB unavailability is reported as recovery evidence instead of confusing completion state.
+- **HUD pane ownership converges cleanly** — Team/Ultragoal HUD panes no longer duplicate, and convergence still works when pane environment variables are absent.
+- **Doctor shared-skill warnings are narrower** — doctor avoids noisy shared skill-root warnings outside the relevant ownership boundary.
+
+### PRs
+
+- #2531, #2532, #2535, #2539, #2544, #2545, #2546, #2549, #2553, #2554
+
+### Issues
+
+- No separately closed GitHub issues were found for the `v0.18.4..HEAD` release range; the release scope is represented by the merged PR inventory above.
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.5.md`.
+
+## [0.18.4] - 2026-05-26
+
+Patch release for the post-`0.18.3` runtime-safety train: Ultragoal recovery, deprecated explore guidance, Team/HUD ownership fixes, plugin native-agent setup reliability, project-local trust sync, Autopilot question waiting, and ralplan reviewer-contract hardening.
+
+### Changed
+
+- **Explore is formally deprecated** — runtime guidance no longer recommends `omx explore` for new repository lookup work, while leaving compatibility behavior available for legacy callers.
+- **Ralplan reviewer contracts are tighter** — reviewer subagents now receive narrower instructions so consensus handoffs stay grounded and do not overstep execution authority.
+
+### Fixed
+
+- **Ultragoal recovery is safer** — plain-label checklist sections are ignored, and completed aggregate goals no longer trigger unrecoverable Stop recovery loops.
+- **Autopilot waits for operator answers** — deep-interview question flow can now block on `omx question` instead of racing ahead.
+- **Team and HUD ownership is cleaner** — worker UserPromptSubmit no longer owns leader HUD reconciliation, and duplicate HUD pane spawn convergence is fixed.
+- **Plugin/native-agent setup is more reliable** — doctor now surfaces missing reviewer roles, plugin native-agent role setup CI is fixed, and plugin-only obsolete native agents are preserved.
+- **Project-local trust sync relaunches safely** — Codex config trust sync no longer corrupts config during relaunch.
+
+### PRs
+
+- #2499, #2501, #2502, #2504, #2507, #2508, #2515, #2519, #2521, #2522, #2524, #2525
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.4.md`.
+
+## [0.18.3] - 2026-05-25
+
+Patch release for the post-`0.18.2` reliability and operator-experience train: HUD/tmux lifecycle cleanup, Team diff gutter preservation, auth slot hot-swap support, visible explore prompt syntax guidance, deep-interview runtime config overrides, stricter `plan_then_execute` handoff authority, plugin-owned hook preservation, and the Scholastic ontology reviewer agent.
+
+### Added
+
+- **Scholastic ontology reviewer** — adds a first-class Scholastic reviewer agent across definitions, native config, catalog, plugin metadata, and docs.
+- **Skills/agents bloat audit collateral** — records the inventory and connectivity roadmap for future consolidation work.
+
+### Changed
+
+- **Deep-interview runtime configuration** — supports `deepInterview` runtime config overrides and mirrors the guidance through canonical and plugin skill surfaces.
+- **Auth slot hot-swap support** — includes the auth slot hot-swap wrapper from the final `dev` delta.
+- **Explore prompt syntax visibility** — keeps prompt syntax visible in runtime guidance.
+- **Handoff authority is stricter** — `plan_then_execute` downstream authority is enforced as a binding gate for deep-interview/ralplan handoffs.
+
+### Fixed
+
+- **HUD lifecycle and ownership** — coalesces launch HUD panes by leader, preserves session id and owner env during reconcile, reaps dead-leader HUD panes, and reuses the existing HUD during UserPromptSubmit revive.
+- **Team diff readability** — preserves diff gutters on wrapped multi-line hunks.
+- **Plugin hook ownership** — respects plugin-owned hooks without overwriting user/plugin surfaces during setup/update paths.
+
+### PRs
+
+- #2474, #2476, #2477, #2478, #2481, #2482, #2483, #2484, #2485, #2486, #2487, #2488, #2489, #2491, #2492, #2493, #2494, #2495
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.3.md`.
+- Accepted residual risk: one `cargo test` assertion in `omx-explore` process-group timeout cleanup was waived by release-owner direction for this cut.
+
+## [0.18.2] - 2026-05-23
+
+Patch release for the closed post-`0.18.1` issue train. This release promotes the `dev` fixes for every currently closed, completed GitHub issue opened after `v0.18.1`, plus the Prometheus Strict planner surface and Ultragoal HUD progress display that also merged during the compare range.
+
+### Added
+
+- **Prometheus Strict recipe workflow** — restores a recipe-only interview-driven planner surface with `omx question` routing, native agent definitions, catalog entries, mirrored plugin skill files, and dogfood documentation (#2415, #2437).
+- **Ultragoal HUD progress** — HUD output now summarizes active Ultragoal progress and tightens review follow-up handling so long-running durable goals stay visible during execution (#2472).
+
+### Changed
+
+- **Autopilot and planning handoffs are more auditable** — Autopilot now exposes the full durable phase chain, ralplan consensus requires explicit Architect/Critic evidence before handoff, and ralplan examples point to Ultragoal as the default durable execution path (#2432, #2447, #2455).
+- **Deep-interview remains a requirements boundary** — deep-interview handoffs now avoid implicit implementation and preserve explicit execution transition requirements (#2427).
+- **Research workflow guidance is clearer** — best-practice research, Autoresearch, Autoresearch Goal, and ralplan now have sharper boundaries, with in-repo docs CSS paths verified (#2469).
+
+### Fixed
+
+- **Plugin/native hook reliability** — doctor no longer warns about missing setup-owned `hooks.json` when plugin-mode hook coverage is valid, native review subagents no longer activate workflow state from quoted parent keywords, and project-scope runtime `CODEX_HOME` launches no longer duplicate native hooks or lose trust state (#2431, #2448, #2471).
+- **Tmux/HUD/madmax stability** — tmux 3.2a-compatible resize hooks, per-run madmax detached lock identity, stale-lock diagnostics/recovery, boxed `OMX_ROOT` forwarding, per-leader HUD ownership, and clearer same-directory madmax lock diagnostics are included (#2434, #2436, #2442, #2452, #2461, #2463).
+- **Team and notification safety** — team startup-direct evidence gates, team Stop state isolation, and bounded Codex Desktop `turn-ended` notification dispatch prevent false success paths and runaway notify storms (#2439, #2450, #2457).
+- **Ultragoal recovery** — unavailable Codex goal storage such as `no such table: thread_goals` is classified and checkpointed as non-terminal blocked recovery evidence instead of trapping completed work (#2467).
+
+### Closed issue audit
+
+Opened after `v0.18.1` and currently closed:
+
+- Completed and merged to `dev`: #2429→#2431, #2430→#2432, #2433→#2434, #2435→#2436, #2438→#2439, #2440→#2442, #2443→#2447, #2445→#2448, #2449→#2450, #2451→#2452, #2453→#2455, #2456→#2457, #2460→#2461, #2462→#2463, #2466→#2467, #2468→#2469, #2470→#2471.
+- Closed as not planned / not an execution-track merge: #2428 (too broad; requested narrower follow-ups) and #2465 (contribution-gate closure). These had no required release merge.
+
+### PRs
+
+- #2415, #2427, #2431, #2432, #2434, #2436, #2437, #2439, #2442, #2447, #2448, #2450, #2452, #2455, #2457, #2461, #2463, #2467, #2469, #2471, #2472
+
+### Verification
+
+- Release readiness evidence is tracked in `docs/qa/release-readiness-0.18.2.md`.
+
+
 ## [0.18.0] - 2026-05-19
 
 Minor release focused on local-generation infrastructure, SparkShell operator safety, and runtime reliability after `0.17.3`. The release adds the OMX API gateway, routes SparkShell summaries through the local API surface, improves real/local generation compatibility, and closes a cluster of hook, notify, tmux, Windows MCP, and workflow-state regressions found while preparing the release.

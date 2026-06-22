@@ -67,6 +67,7 @@ import {
 import type { TeamReminderIntent } from './reminder-intents.js';
 import type { WorktreeMode } from './worktree.js';
 import { resolveCanonicalTeamStateRoot } from './state-root.js';
+import { normalizeTeamTaskCoordinationPlanForStorage } from './coordination-protocol.js';
 
 export type { TeamDispatchRequestStatus, TeamWorkerIntegrationStatus } from './contracts.js';
 
@@ -90,6 +91,8 @@ export interface TeamConfig {
   leader_pane_id: string | null;
   /** HUD pane spawned below the leader column — excluded from worker pane cleanup. */
   hud_pane_id: string | null;
+  /** Team-scoped tmux pane owner token used by shutdown safety checks. */
+  tmux_pane_owner_id?: string;
   /** Registered HUD resize hook name used for window-size reconciliation. */
   resize_hook_name: string | null;
   /** Registered HUD resize hook target in "<session>:<window>" form. */
@@ -142,6 +145,30 @@ export interface TeamTaskDelegationComplianceEvidence {
   recorded_at: string;
 }
 
+export type TeamTaskCoordinationMode = 'lightweight' | 'coordinated';
+
+export type TeamTaskCoordinationMechanism =
+  | 'shared_mental_model'
+  | 'closed_loop_communication'
+  | 'mutual_performance_monitoring'
+  | 'backup_behavior'
+  | 'adaptability_checkpoint'
+  | 'team_orientation';
+
+export interface TeamTaskCoordinationPlan {
+  mode: TeamTaskCoordinationMode;
+  activation_reasons: string[];
+  required_mechanisms?: TeamTaskCoordinationMechanism[];
+  source?: 'explicit' | 'synthesized';
+}
+
+export interface TeamTaskCoordinationComplianceEvidence {
+  status: 'checked' | 'no_boundary_handoff';
+  source: 'terminal_result';
+  detail: string;
+  recorded_at: string;
+}
+
 export interface TeamTaskDelegationPlan {
   mode: TeamTaskDelegationMode;
   max_parallel_subtasks?: number;
@@ -176,6 +203,8 @@ export interface TeamTask {
   completed_at?: string;
   delegation?: TeamTaskDelegationPlan;
   delegation_compliance?: TeamTaskDelegationComplianceEvidence;
+  coordination?: TeamTaskCoordinationPlan;
+  coordination_compliance?: TeamTaskCoordinationComplianceEvidence;
 }
 
 export interface TeamTaskClaim {
@@ -281,6 +310,7 @@ export interface TeamManifestV2 {
   worktree_mode?: WorktreeMode;
   leader_pane_id: string | null;
   hud_pane_id: string | null;
+  tmux_pane_owner_id?: string;
   resize_hook_name: string | null;
   resize_hook_target: string | null;
   /** Monotonic counter for worker index assignment during scaling. */
@@ -362,7 +392,7 @@ export type ClaimTaskResult =
 
 export type TransitionTaskResult =
   | { ok: true; task: TeamTaskV2 }
-  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' | 'already_terminal' | 'lease_expired' | 'missing_delegation_compliance_evidence' };
+  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' | 'already_terminal' | 'lease_expired' | 'missing_delegation_compliance_evidence' | 'missing_coordination_compliance_evidence' };
 
 export type ReleaseTaskClaimResult =
   | { ok: true; task: TeamTaskV2 }
@@ -444,6 +474,10 @@ function defaultLeader(): TeamLeader {
     worker_id: 'leader-fixed',
     role: 'coordinator',
   };
+}
+
+function defaultTmuxPaneOwnerId(teamName: string): string {
+  return `team:${teamName}`;
 }
 
 function defaultPolicy(
@@ -574,9 +608,12 @@ async function resolveLeaderSessionId(cwd: string, env: NodeJS.ProcessEnv): Prom
 }
 
 function normalizeTask(task: TeamTask): TeamTaskV2 {
+  const normalizedCoordination = normalizeTeamTaskCoordinationPlanForStorage(task.coordination);
+  const { coordination: _coordination, ...rest } = task;
   return {
-    ...task,
+    ...rest,
     depends_on: task.depends_on ?? task.blocked_by ?? [],
+    ...(normalizedCoordination ? { coordination: normalizedCoordination } : {}),
     version: Math.max(1, task.version ?? 1),
   };
 }
@@ -793,6 +830,7 @@ export async function initTeamState(
   const displayMode = resolveDisplayModeFromEnv(env);
   const permissionsSnapshot = resolvePermissionsSnapshot(env);
   const workerLaunchMode = resolveWorkerLaunchModeFromEnv(env);
+  const tmuxPaneOwnerId = defaultTmuxPaneOwnerId(teamName);
 
   const config: TeamConfig = {
     name: teamName,
@@ -812,6 +850,7 @@ export async function initTeamState(
     worktree_mode: workspace.worktree_mode,
     leader_pane_id: null,
     hud_pane_id: null,
+    tmux_pane_owner_id: tmuxPaneOwnerId,
     resize_hook_name: null,
     resize_hook_target: null,
     next_worker_index: workerCount + 1,
@@ -857,6 +896,7 @@ export async function initTeamState(
       worktree_mode: workspace.worktree_mode,
       leader_pane_id: null,
       hud_pane_id: null,
+      tmux_pane_owner_id: tmuxPaneOwnerId,
       resize_hook_name: null,
       resize_hook_target: null,
       next_worker_index: workerCount + 1,
@@ -891,6 +931,7 @@ async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
       worktree_mode: normalized.worktree_mode,
       leader_pane_id: normalized.leader_pane_id,
       hud_pane_id: normalized.hud_pane_id,
+      tmux_pane_owner_id: normalized.tmux_pane_owner_id,
       resize_hook_name: normalized.resize_hook_name,
       resize_hook_target: normalized.resize_hook_target,
       next_worker_index: normalized.next_worker_index ?? existing.next_worker_index,
@@ -926,6 +967,7 @@ function teamConfigFromManifest(manifest: TeamManifestV2): TeamConfig {
     worktree_mode: manifest.worktree_mode,
     leader_pane_id: manifest.leader_pane_id,
     hud_pane_id: manifest.hud_pane_id,
+    tmux_pane_owner_id: manifest.tmux_pane_owner_id ?? defaultTmuxPaneOwnerId(manifest.name),
     resize_hook_name: manifest.resize_hook_name,
     resize_hook_target: manifest.resize_hook_target,
     next_worker_index: manifest.next_worker_index,
@@ -942,6 +984,9 @@ function normalizeTeamConfig(config: TeamConfig): TeamConfig {
     lifecycle_profile: 'default',
     leader_pane_id: config.leader_pane_id ?? null,
     hud_pane_id: config.hud_pane_id ?? null,
+    tmux_pane_owner_id: typeof config.tmux_pane_owner_id === 'string' && config.tmux_pane_owner_id.trim() !== ''
+      ? config.tmux_pane_owner_id.trim()
+      : defaultTmuxPaneOwnerId(config.name),
     resize_hook_name: config.resize_hook_name ?? null,
     resize_hook_target: config.resize_hook_target ?? null,
     worker_launch_mode: workerLaunchMode,
@@ -979,6 +1024,7 @@ function teamManifestFromConfig(config: TeamConfig): TeamManifestV2 {
     worktree_mode: normalized.worktree_mode,
     leader_pane_id: normalized.leader_pane_id,
     hud_pane_id: normalized.hud_pane_id,
+    tmux_pane_owner_id: normalized.tmux_pane_owner_id,
     resize_hook_name: normalized.resize_hook_name,
     resize_hook_target: normalized.resize_hook_target,
     next_worker_index: normalized.next_worker_index,
@@ -997,12 +1043,16 @@ export async function writeTeamManifestV2(manifest: TeamManifestV2, cwd: string)
     manifest.governance,
     manifest.policy as Partial<TeamGovernance>,
   );
+  const tmuxPaneOwnerId = typeof manifest.tmux_pane_owner_id === 'string' && manifest.tmux_pane_owner_id.trim() !== ''
+    ? manifest.tmux_pane_owner_id.trim()
+    : defaultTmuxPaneOwnerId(manifest.name);
   const p = teamManifestV2Path(manifest.name, cwd);
   await writeAtomic(
     p,
     JSON.stringify(
       {
         ...manifest,
+        tmux_pane_owner_id: tmuxPaneOwnerId,
         policy: normalizedPolicy,
         governance: normalizedGovernance,
         lifecycle_profile: 'default',
@@ -1028,8 +1078,12 @@ export async function readTeamManifestV2(teamName: string, cwd: string): Promise
       team_decomposition?: unknown;
     }) | undefined;
     const legacyTeamDecomposition = legacyPolicy?.team_decomposition;
+    const tmuxPaneOwnerId = typeof parsedManifest.tmux_pane_owner_id === 'string' && parsedManifest.tmux_pane_owner_id.trim() !== ''
+      ? parsedManifest.tmux_pane_owner_id.trim()
+      : defaultTmuxPaneOwnerId(parsedManifest.name);
     return {
       ...parsedManifest,
+      tmux_pane_owner_id: tmuxPaneOwnerId,
       policy: normalizeTeamPolicy(parsedManifest.policy, {
         display_mode: parsedManifest.policy?.display_mode === 'split_pane' ? 'split_pane' : 'auto',
         worker_launch_mode: parsedManifest.policy?.worker_launch_mode === 'prompt' ? 'prompt' : 'interactive',
@@ -1254,12 +1308,15 @@ export async function createTask(
     const nextId = String(nextNumeric);
 
     const created: TeamTaskV2 = {
-      ...task,
+      ...normalizeTask({
+        ...task,
+        id: nextId,
+        created_at: new Date().toISOString(),
+      }),
       id: nextId,
       status: task.status ?? 'pending',
       depends_on: task.depends_on ?? task.blocked_by ?? [],
       version: 1,
-      created_at: new Date().toISOString(),
     };
 
     await writeAtomic(taskFilePath(teamName, nextId, cwd), JSON.stringify(created, null, 2));
@@ -1302,14 +1359,14 @@ export async function updateTask(
     const rawDeps = updates.depends_on ?? updates.blocked_by ?? existing.depends_on ?? existing.blocked_by ?? [];
     const normalizedDeps = Array.isArray(rawDeps) ? rawDeps : [];
 
-    const merged: TeamTaskV2 = {
+    const merged = normalizeTask({
       ...normalizeTask(existing),
       ...updates,
       id: existing.id,
       created_at: existing.created_at,
       depends_on: normalizedDeps,
       version: Math.max(1, existing.version ?? 1) + 1,
-    };
+    });
 
     await writeAtomic(taskFilePath(teamName, taskId, cwd), JSON.stringify(merged, null, 2));
     return merged;

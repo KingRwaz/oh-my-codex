@@ -17,6 +17,14 @@ import { parse as parseToml } from "@iarna/toml";
 import { setup } from "../setup.js";
 import { uninstall } from "../uninstall.js";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../../config/omx-first-party-mcp.js";
+import {
+	OMX_DEVELOPER_INSTRUCTIONS,
+	OMX_PLUGIN_DEVELOPER_INSTRUCTIONS,
+} from "../../config/generator.js";
+import {
+	materializePackagedOmxPluginCache,
+	resolvePackagedOmxMarketplace,
+} from "../plugin-marketplace.js";
 
 const packageRoot = process.cwd();
 let previousPathForFakeCodex: string | undefined;
@@ -496,9 +504,9 @@ async function assertProjectPluginModeArtifacts(wd: string): Promise<void> {
 		existsSync(join(wd, ".codex", "skills", "ask", "SKILL.md")),
 		false,
 	);
-	assert.equal(existsSync(join(wd, ".codex", "agents", "planner.toml")), false);
+	assert.equal(existsSync(join(wd, ".codex", "agents", "planner.toml")), true);
 	assert.equal(existsSync(join(wd, ".codex", "prompts", "executor.md")), false);
-	assert.equal(existsSync(join(wd, "AGENTS.md")), false);
+	assert.equal(existsSync(join(wd, "AGENTS.md")), true);
 
 	const persisted = JSON.parse(
 		await readFile(join(wd, ".omx", "setup-scope.json"), "utf-8"),
@@ -593,6 +601,40 @@ async function seedStalePluginDiscoveryCache(codexHomeDir: string): Promise<stri
 	await mkdir(join(artifactPath, "skills", "old-only"), { recursive: true });
 	await writeFile(join(artifactPath, "skills", "old-only", "SKILL.md"), "# old\n");
 	return artifactPath;
+}
+
+
+async function seedSameVersionPluginCacheWithStaleHooks(codexHomeDir: string): Promise<string> {
+	const cacheDir = await packagedPluginCacheDir(codexHomeDir);
+	await mkdir(dirname(cacheDir), { recursive: true });
+	await cp(join(packageRoot, "plugins", "oh-my-codex"), cacheDir, {
+		recursive: true,
+	});
+	await writeFile(
+		join(cacheDir, "hooks", "omx-command.json"),
+		JSON.stringify({ command: process.execPath, argsPrefix: [join(packageRoot, "dist", "cli", "omx.js")] }, null, 2) + "\n",
+	);
+	const hooksPath = join(cacheDir, "hooks", "hooks.json");
+	const hooks = JSON.parse(await readFile(hooksPath, "utf-8")) as { hooks?: { PreToolUse?: Array<Record<string, unknown>> } };
+	const preToolUse = hooks.hooks?.PreToolUse?.[0];
+	assert.ok(preToolUse, "expected packaged plugin PreToolUse hook fixture");
+	preToolUse.matcher = "Bash";
+	await writeFile(hooksPath, JSON.stringify(hooks, null, 2) + "\n");
+	return cacheDir;
+}
+
+
+async function seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir: string): Promise<string> {
+	const cacheDir = await packagedPluginCacheDir(codexHomeDir);
+	await mkdir(dirname(cacheDir), { recursive: true });
+	await cp(join(packageRoot, "plugins", "oh-my-codex"), cacheDir, {
+		recursive: true,
+	});
+	await writeFile(
+		join(cacheDir, "hooks", "omx-command.json"),
+		JSON.stringify({ command: "/stale/node", argsPrefix: ["/stale/omx.js"] }, null, 2) + "\n",
+	);
+	return cacheDir;
 }
 
 async function packagedPluginCacheDir(codexHomeDir: string): Promise<string> {
@@ -841,10 +883,10 @@ describe("omx setup install mode behavior", () => {
 		}
 	});
 
-	it("prints plugin-mode next steps without claiming native agent TOML files were written", async () => {
+	it("installs native agent TOML files in plugin mode so agent_type roles are available", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
 		try {
-			await withIsolatedUserHome(wd, async () => {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
 				const output = await runSetupWithCapturedLogs(wd, {
 					scope: "user",
 					installMode: "plugin",
@@ -855,7 +897,49 @@ describe("omx setup install mode behavior", () => {
 					output,
 					/Registered Codex marketplace oh-my-codex-local supplies OMX skills and workflow surfaces/,
 				);
-				assert.doesNotMatch(output, /TOML files written to \.codex\/agents\//);
+				assert.match(output, /Native agent role TOML files written to \.codex\/agents\//);
+
+				for (const role of ["architect", "critic", "scholastic"]) {
+					const tomlPath = join(codexHomeDir, "agents", `${role}.toml`);
+					assert.equal(existsSync(tomlPath), true, `${role}.toml should exist`);
+					const toml = await readFile(tomlPath, "utf-8");
+					assert.match(toml, new RegExp(`^name = "${role}"$`, "m"));
+				}
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("omits Team plugin skills and native team executor when plugin mode disables Team", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-no-team-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						teamMode: "disabled",
+					});
+				});
+
+				const pkg = JSON.parse(
+					await readFile(join(packageRoot, "package.json"), "utf-8"),
+				) as { version: string };
+				const cacheSkillsDir = join(
+					codexHomeDir,
+					"plugins",
+					"cache",
+					"oh-my-codex-local",
+					"oh-my-codex",
+					pkg.version,
+					"skills",
+				);
+				assert.equal(existsSync(join(cacheSkillsDir, "team", "SKILL.md")), false);
+				assert.equal(existsSync(join(cacheSkillsDir, "worker", "SKILL.md")), false);
+				assert.equal(existsSync(join(cacheSkillsDir, "ralph", "SKILL.md")), true);
+				assert.equal(existsSync(join(codexHomeDir, "agents", "team-executor.toml")), false);
+				assert.equal(existsSync(join(codexHomeDir, "agents", "executor.toml")), true);
 			});
 		} finally {
 			await rm(wd, { recursive: true, force: true });
@@ -1104,6 +1188,87 @@ describe("omx setup install mode behavior", () => {
 		}
 	});
 
+	it("invalidates same-version plugin caches when hook file contents drift", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const cacheDir = await seedSameVersionPluginCacheWithStaleHooks(codexHomeDir);
+
+					const output = await captureConsoleOutput(async () => {
+						await setup({ scope: "user", installMode: "plugin" });
+					});
+
+					const refreshedHooks = JSON.parse(
+						await readFile(join(cacheDir, "hooks", "hooks.json"), "utf-8"),
+					) as { hooks?: { PreToolUse?: Array<{ matcher?: unknown }> } };
+					assert.equal(refreshedHooks.hooks?.PreToolUse?.[0]?.matcher, undefined);
+					assert.match(output, /Invalidated 1 stale Codex plugin discovery cache entry/);
+					assert.match(output, /Installed local Codex plugin cache/);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("invalidates same-version plugin caches when the pinned hook launcher drifts", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const cacheDir = await seedSameVersionPluginCacheWithStaleLauncher(codexHomeDir);
+
+					const output = await captureConsoleOutput(async () => {
+						await setup({ scope: "user", installMode: "plugin" });
+					});
+
+					const launcher = JSON.parse(
+						await readFile(join(cacheDir, "hooks", "omx-command.json"), "utf-8"),
+					) as { command?: string; argsPrefix?: string[] };
+					assert.equal(launcher.command, process.execPath);
+					assert.deepEqual(launcher.argsPrefix, [join(packageRoot, "dist", "cli", "omx.js")]);
+					assert.match(output, /Invalidated 1 stale Codex plugin discovery cache entry/);
+					assert.match(output, /Installed local Codex plugin cache/);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+	it("materializes replacement plugin caches without removing the existing cache root", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				const cacheDir = await seedSameVersionPluginCacheWithStaleHooks(codexHomeDir);
+				const staleOnlyPath = join(cacheDir, "stale-only.txt");
+				await writeFile(staleOnlyPath, "stale\n");
+				const packagedMarketplace = await resolvePackagedOmxMarketplace(packageRoot);
+				assert.ok(packagedMarketplace, "expected packaged OMX plugin marketplace fixture");
+
+				let observedPreparedCache = false;
+				await materializePackagedOmxPluginCache(codexHomeDir, packagedMarketplace, {
+					onCacheDirPrepared: async (preparedCacheDir) => {
+						if (preparedCacheDir !== cacheDir) return;
+						observedPreparedCache = true;
+						assert.equal(existsSync(cacheDir), true, "cache root must remain present before overlay replacement starts");
+						assert.equal(existsSync(join(cacheDir, ".codex-plugin", "plugin.json")), true);
+						assert.equal(existsSync(join(cacheDir, "hooks", "codex-native-hook.mjs")), true);
+					},
+				});
+
+				assert.equal(observedPreparedCache, true, "test hook should observe cache root during replacement");
+				assert.equal(existsSync(cacheDir), true);
+				assert.equal(existsSync(join(cacheDir, ".codex-plugin", "plugin.json")), true);
+				assert.equal(existsSync(join(cacheDir, "hooks", "codex-native-hook.mjs")), true);
+				assert.equal(existsSync(join(cacheDir, "hooks", "omx-command.json")), true);
+				assert.equal(existsSync(staleOnlyPath), false, "overlay cleanup should remove stale files after refreshed files are present");
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
 	it("reports stale plugin discovery cache invalidation during dry-run without deleting it", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
 		try {
@@ -1321,7 +1486,7 @@ describe("omx setup install mode behavior", () => {
 					);
 					assert.equal(
 						existsSync(join(codexHomeDir, "agents", "planner.toml")),
-						false,
+						true,
 					);
 					assert.equal(
 						existsSync(join(codexHomeDir, "prompts", "executor.md")),
@@ -1564,13 +1729,13 @@ describe("omx setup install mode behavior", () => {
 					);
 					assert.equal(
 						existsSync(join(codexHomeDir, "agents", "planner.toml")),
-						false,
+						true,
 					);
 					assert.equal(
 						existsSync(join(codexHomeDir, "prompts", "executor.md")),
 						false,
 					);
-					assert.equal(existsSync(join(codexHomeDir, "AGENTS.md")), false);
+					assert.equal(existsSync(join(codexHomeDir, "AGENTS.md")), true);
 				});
 			});
 		} finally {
@@ -1597,7 +1762,7 @@ describe("omx setup install mode behavior", () => {
 					);
 					assert.equal(
 						existsSync(join(codexHomeDir, "agents", "planner.toml")),
-						false,
+						true,
 					);
 					assert.equal(
 						existsSync(join(codexHomeDir, "prompts", "executor.md")),
@@ -1609,14 +1774,16 @@ describe("omx setup install mode behavior", () => {
 						"utf-8",
 					);
 					assert.match(config, /developer_instructions\s*=/);
+					assert.match(config, /<omx version=\\"1\\">You have oh-my-codex installed through Codex plugin mode/);
+					assert.ok(config.includes("detail.</omx>"));
 					assert.match(
 						config,
-						/Registered Codex plugin marketplace surfaces supply OMX workflows, prompts, and native-agent roles/,
+						/Registered Codex plugin marketplace surfaces supply OMX workflows and plugin-scoped companion resources/,
 					);
 					assert.match(config, /User-installed skills may still live under ~\/.codex\/skills/);
 					assert.match(
 						config,
-						/Setup-owned prompt files and native-agent TOML defaults are intentionally omitted unless explicitly installed/,
+						/native agent roles are installed as setup-owned Codex agent TOML files in plugin mode so agent_type routing works/i,
 					);
 					assert.doesNotMatch(config, /Native subagents live in \.codex\/agents/);
 					assert.doesNotMatch(config, /Treat installed prompts as narrower execution surfaces/);
@@ -1644,12 +1811,12 @@ describe("omx setup install mode behavior", () => {
 					);
 					assert.match(
 						agentsMd,
-						/Registered Codex plugin marketplace surfaces supply OMX workflows, prompts, and native-agent roles/,
+						/Registered Codex plugin marketplace surfaces supply OMX workflows and plugin-scoped companion resources/,
 					);
 					assert.match(agentsMd, /User-installed skills may still live under `~\/.codex\/skills`/);
 					assert.match(
 						agentsMd,
-						/Setup-owned prompt files and native-agent TOML defaults are intentionally omitted in plugin mode unless explicitly installed/,
+						/native agent roles are installed as setup-owned Codex agent TOML files in plugin mode so agent_type routing works/i,
 					);
 					assert.doesNotMatch(agentsMd, /Role prompts under `prompts\/\*\.md`/);
 					assert.doesNotMatch(agentsMd, /load the installed prompt\/skill\/agent surfaces from/);
@@ -1675,7 +1842,7 @@ describe("omx setup install mode behavior", () => {
 					const agentsMd = await readFile(join(wd, "AGENTS.md"), "utf-8");
 					assert.match(
 						agentsMd,
-						/Registered Codex plugin marketplace surfaces supply OMX workflows, prompts, and native-agent roles/,
+						/Registered Codex plugin marketplace surfaces supply OMX workflows and plugin-scoped companion resources/,
 					);
 					assert.match(
 						agentsMd,
@@ -1691,7 +1858,7 @@ describe("omx setup install mode behavior", () => {
 		}
 	});
 
-	it("preserves existing developer_instructions when plugin defaults are requested", async () => {
+	it("preserves custom developer_instructions without prompting", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
 		try {
 			await withIsolatedUserHome(wd, async (codexHomeDir) => {
@@ -1700,12 +1867,17 @@ describe("omx setup install mode behavior", () => {
 					const existingConfig = 'developer_instructions = "custom"\n';
 					await writeFile(configPath, existingConfig);
 
+					let promptCount = 0;
 					await setup({
 						scope: "user",
 						installMode: "plugin",
-						pluginDeveloperInstructionsPrompt: async () => true,
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return true;
+						},
 					});
 
+					assert.equal(promptCount, 0);
 					const config = await readFile(configPath, "utf-8");
 					assert.match(config, /^developer_instructions = "custom"$/m);
 					assert.match(config, /^plugin_hooks = true$/m);
@@ -1720,7 +1892,265 @@ describe("omx setup install mode behavior", () => {
 		}
 	});
 
-	it("can overwrite existing developer_instructions after explicit plugin prompt approval", async () => {
+	it("preserves current wrapped developer_instructions without prompting", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+					await writeFile(
+						configPath,
+						`developer_instructions = ${JSON.stringify(OMX_PLUGIN_DEVELOPER_INSTRUCTIONS)}\n`,
+					);
+
+					let promptCount = 0;
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return "refresh";
+						},
+					});
+
+					assert.equal(promptCount, 0);
+					const config = await readFile(configPath, "utf-8");
+					assert.match(config, /<omx version=\\"1\\">You have oh-my-codex installed through Codex plugin mode/);
+					assert.equal(
+						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
+						1,
+					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves latest unwrapped developer_instructions without prompting", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+					const latestUnwrapped =
+						"You have oh-my-codex installed through Codex plugin mode. AGENTS.md is the orchestration brain and main control surface. Follow AGENTS.md for skill/keyword routing and $name workflow invocation. When spawning native subagents, set `agent_type` to an installed role and never omit it for OMX work. Registered Codex plugin marketplace surfaces supply OMX workflows and plugin-scoped companion resources when the plugin is installed; native agent roles are installed as setup-owned Codex agent TOML files in plugin mode so agent_type routing works. User-installed skills may still live under ~/.codex/skills. Use outcome-first, concise progress updates: state the target result, constraints, validation evidence, and stop condition before adding process detail.";
+					await writeFile(
+						configPath,
+						`developer_instructions = ${JSON.stringify(latestUnwrapped)}\n`,
+					);
+
+					let promptCount = 0;
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return "refresh";
+						},
+					});
+
+					assert.equal(promptCount, 0);
+					const config = await readFile(configPath, "utf-8");
+					assert.match(config, /You have oh-my-codex installed through Codex plugin mode/);
+					assert.doesNotMatch(config, /<omx version=/);
+					assert.equal(
+						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
+						1,
+					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("updates managed classic developer_instructions during plugin migration", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+					await writeFile(
+						configPath,
+						`developer_instructions = ${JSON.stringify(OMX_DEVELOPER_INSTRUCTIONS)}\n`,
+					);
+
+					let promptCount = 0;
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return true;
+						},
+					});
+
+					assert.equal(promptCount, 1);
+					const config = await readFile(configPath, "utf-8");
+					assert.match(
+						config,
+						/<omx version=\\"1\\">You have oh-my-codex installed through Codex plugin mode/,
+					);
+					assert.doesNotMatch(
+						config,
+						/You have oh-my-codex installed\\. AGENTS\\.md/,
+					);
+					assert.equal(
+						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
+						1,
+					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves managed classic developer_instructions when plugin migration refresh is declined", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+					await writeFile(
+						configPath,
+						`developer_instructions = ${JSON.stringify(OMX_DEVELOPER_INSTRUCTIONS)}\n`,
+					);
+
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginDeveloperInstructionsPrompt: async () => false,
+					});
+
+					const config = await readFile(configPath, "utf-8");
+					assert.match(config, /You have oh-my-codex installed\. AGENTS\.md/);
+					assert.doesNotMatch(config, /<omx version=/);
+					assert.equal(
+						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
+						1,
+					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves edited classic developer_instructions containing the legacy phrase", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+					const edited = `${OMX_DEVELOPER_INSTRUCTIONS}\nCustom local rule: keep this line.`;
+					await writeFile(
+						configPath,
+						`developer_instructions = ${JSON.stringify(edited)}\n`,
+					);
+
+					let promptCount = 0;
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return true;
+						},
+					});
+
+					assert.equal(promptCount, 0);
+					const config = await readFile(configPath, "utf-8");
+					assert.match(config, /You have oh-my-codex installed\. AGENTS\.md/);
+					assert.match(config, /Custom local rule: keep this line/);
+					assert.doesNotMatch(config, /<omx version=/);
+					assert.equal(
+						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
+						1,
+					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves edited wrapper developer_instructions as custom without prompting", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+					const edited = '<omx version="1">Custom instructions</omx>';
+					await writeFile(
+						configPath,
+						`developer_instructions = ${JSON.stringify(edited)}\n`,
+					);
+
+					let promptCount = 0;
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return "refresh";
+						},
+					});
+
+					assert.equal(promptCount, 0);
+					const config = await readFile(configPath, "utf-8");
+					assert.match(config, /Custom instructions/);
+					assert.doesNotMatch(config, /Registered Codex plugin marketplace surfaces supply OMX workflows/);
+					assert.equal(
+						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
+						1,
+					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves changed-version wrapper developer_instructions as custom without prompting", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+					const edited = '<omx version="2">Custom instructions</omx>';
+					await writeFile(
+						configPath,
+						`developer_instructions = ${JSON.stringify(edited)}\n`,
+					);
+
+					let promptCount = 0;
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return "refresh";
+						},
+					});
+
+					assert.equal(promptCount, 0);
+					const config = await readFile(configPath, "utf-8");
+					assert.match(config, /version=\\"2\\">Custom instructions/);
+					assert.doesNotMatch(config, /Registered Codex plugin marketplace surfaces supply OMX workflows/);
+					assert.equal(
+						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
+						1,
+					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("does not refresh custom developer_instructions from plugin policy prompt", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
 		try {
 			await withIsolatedUserHome(wd, async (codexHomeDir) => {
@@ -1728,22 +2158,47 @@ describe("omx setup install mode behavior", () => {
 					const configPath = join(codexHomeDir, "config.toml");
 					await writeFile(configPath, 'developer_instructions = "custom"\n');
 
+					let promptCount = 0;
 					await setup({
 						scope: "user",
 						installMode: "plugin",
-						pluginDeveloperInstructionsPrompt: async () => true,
-						pluginDeveloperInstructionsOverwritePrompt: async () => true,
+						pluginDeveloperInstructionsPrompt: async () => {
+							promptCount += 1;
+							return "refresh";
+						},
 					});
 
+					assert.equal(promptCount, 0);
 					const config = await readFile(configPath, "utf-8");
-					assert.match(config, /You have oh-my-codex installed/);
-					assert.doesNotMatch(config, /^developer_instructions = "custom"$/m);
+					assert.match(config, /^developer_instructions = "custom"$/m);
 					assert.equal(
 						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
 						1,
 					);
 					assert.match(config, /^plugin_hooks = true$/m);
 					assert.doesNotMatch(config, /\[hooks\.state\./);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("does not add developer_instructions in non-interactive plugin mode", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const configPath = join(codexHomeDir, "config.toml");
+
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+					});
+
+					const config = await readFile(configPath, "utf-8");
+					assert.doesNotMatch(config, /^developer_instructions\s*=/m);
+					assert.match(config, /^plugin_hooks = true$/m);
 				});
 			});
 		} finally {
@@ -1845,6 +2300,72 @@ describe("omx setup install mode behavior", () => {
 		}
 	});
 
+	it("preserves same-key user hook trust state in plugin-scoped setup", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					const hooksPath = join(codexHomeDir, "hooks.json");
+					const configPath = join(codexHomeDir, "config.toml");
+					await writeFile(
+						hooksPath,
+						JSON.stringify(
+							{
+								hooks: {
+									PostCompact: [
+										{
+											hooks: [
+												{
+													type: "command",
+													command: "/usr/bin/python3 /tmp/user-hook.py",
+													timeout: 5,
+												},
+											],
+										},
+									],
+								},
+							},
+							null,
+							2,
+						) + "\n",
+					);
+					await writeFile(
+						configPath,
+						[
+							'model = "gpt-5.5"',
+							"",
+							`[hooks.state."${hooksPath}:post_compact:0:0"]`,
+							'trusted_hash = "sha256:user"',
+							"enabled = false",
+							"",
+						].join("\n"),
+					);
+
+					await setup({ scope: "user", installMode: "plugin" });
+
+					const config = await readFile(configPath, "utf-8");
+					assert.match(config, /^plugin_hooks = true$/m);
+					assert.match(config, /^trusted_hash = "sha256:user"$/m);
+					assert.match(config, /^enabled = false$/m);
+					assert.equal(
+						config
+							.split(/\r?\n/)
+							.filter(
+								(line) =>
+									line.trim() ===
+									`[hooks.state."${hooksPath}:post_compact:0:0"]`,
+							).length,
+						1,
+						"plugin setup must not duplicate preserved user hook trust state",
+					);
+					assert.doesNotThrow(() => parseToml(config));
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
 	it("honors persisted project-scoped plugin mode on repeat setup", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
 		try {
@@ -1868,7 +2389,7 @@ describe("omx setup install mode behavior", () => {
 				);
 				assert.equal(
 					existsSync(join(wd, ".codex", "agents", "planner.toml")),
-					false,
+					true,
 				);
 				assert.equal(
 					existsSync(join(wd, ".codex", "prompts", "executor.md")),
@@ -2078,7 +2599,7 @@ describe("omx setup install mode behavior", () => {
 					);
 					assert.match(
 						pluginOutput,
-						/Optional AGENTS\.md and developer_instructions defaults are only installed when selected/,
+						/Plugin-mode AGENTS\.md defaults provide persistent orchestration guidance; developer_instructions is an optional bootstrap/,
 					);
 
 					const legacyWd = join(wd, "legacy");
@@ -2140,14 +2661,70 @@ describe("omx setup install mode behavior", () => {
 
 					assert.equal(existsSync(askSkillPath), false);
 					assert.equal(existsSync(promptPath), false);
-					assert.equal(existsSync(agentPath), false);
+					assert.equal(existsSync(agentPath), true);
 					assert.equal(existsSync(hooksPath), false);
-					assert.equal(existsSync(agentsMdPath), false);
+					assert.equal(existsSync(agentsMdPath), true);
 					const config = await readFile(configPath, "utf-8");
 					assert.match(config, /^plugin_hooks = true$/m);
 					assert.doesNotMatch(
 						config,
-						/^\s*(?:notify|developer_instructions)\s*=|^\s*\[mcp_servers[.\]]/m,
+						/^\s*(?:notify)\s*=|^\s*\[mcp_servers[.\]]/m,
+					);
+					assert.match(config, /^developer_instructions\s*=/m);
+					assert.match(config, /You have oh-my-codex installed\. AGENTS\.md/);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves existing AGENTS.md when plugin AGENTS defaults are declined", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					await setup({ scope: "user", installMode: "legacy" });
+
+					const agentsMdPath = join(codexHomeDir, "AGENTS.md");
+					const before = await readFile(agentsMdPath, "utf-8");
+					assert.match(before, /<!-- omx:generated:agents-md -->/);
+
+					await setup({
+						scope: "user",
+						installMode: "plugin",
+						pluginAgentsMdPrompt: async () => false,
+					});
+
+					assert.equal(await readFile(agentsMdPath, "utf-8"), before);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("repairs existing AGENTS.md during non-interactive plugin force setup", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					await mkdir(codexHomeDir, { recursive: true });
+					const agentsMdPath = join(codexHomeDir, "AGENTS.md");
+					await writeFile(agentsMdPath, "# local instructions\n");
+
+					await setup({ scope: "user", installMode: "plugin", force: true });
+
+					const after = await readFile(agentsMdPath, "utf-8");
+					assert.match(after, /<!-- omx:generated:agents-md -->/);
+					assert.match(after, /oh-my-codex - Intelligent Multi-Agent Orchestration/);
+					const backupRoot = join(wd, "home", ".omx", "backups", "setup");
+					const backupRuns = await readdir(backupRoot);
+					assert.equal(
+						backupRuns.some((entry) =>
+							existsSync(join(backupRoot, entry, ".codex", "AGENTS.md")),
+						),
+						true,
 					);
 				});
 			});
@@ -2156,7 +2733,7 @@ describe("omx setup install mode behavior", () => {
 		}
 	});
 
-	it("archives stale legacy prompts and generated native agents when plugin mode refreshes", async () => {
+	it("archives stale legacy prompts and preserves modified native agents when plugin mode refreshes", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
 		try {
 			await withIsolatedUserHome(wd, async (codexHomeDir) => {
@@ -2169,30 +2746,29 @@ describe("omx setup install mode behavior", () => {
 						promptPath,
 						"---\ndescription: stale legacy executor prompt\n---\n\nold executor body\n",
 					);
-					await writeFile(
-						agentPath,
-						[
-							"# oh-my-codex agent: planner",
-							'name = "planner"',
-							'description = "stale legacy generated planner"',
-							'developer_instructions = """old planner body"""',
-							"",
-						].join("\n"),
-					);
+					const staleAgentToml = [
+						"# oh-my-codex agent: planner",
+						'name = "planner"',
+						'description = "stale legacy generated planner"',
+						'developer_instructions = """old planner body"""',
+						"",
+					].join("\n");
+					await writeFile(agentPath, staleAgentToml);
 
 					const output = await captureConsoleOutput(async () => {
 						await setup({ scope: "user", installMode: "plugin" });
 					});
 
 					assert.equal(existsSync(promptPath), false);
-					assert.equal(existsSync(agentPath), false);
+					assert.equal(existsSync(agentPath), true);
+					assert.equal(await readFile(agentPath, "utf-8"), staleAgentToml);
 					assert.match(
 						output,
 						/Archived and removed .* legacy OMX-managed prompt file/,
 					);
 					assert.match(
 						output,
-						/Archived and removed .* legacy OMX-managed native agent config/,
+						/Native agent role refresh complete/,
 					);
 
 					const backupRoot = join(wd, "home", ".omx", "backups", "setup");
@@ -2212,8 +2788,54 @@ describe("omx setup install mode behavior", () => {
 								join(backupRoot, entry, ".codex", "agents", "planner.toml"),
 							),
 						),
-						true,
+						false,
 					);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves unmanaged native agent TOMLs with obsolete skill_ref during plugin refresh", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await withTempCwd(wd, async () => {
+					await setup({ scope: "user", installMode: "legacy" });
+
+					const customAgentPath = join(
+						codexHomeDir,
+						"agents",
+						"custom-reviewer.toml",
+					);
+					const generatedAgentPath = join(
+						codexHomeDir,
+						"agents",
+						"ghost.toml",
+					);
+					const customAgentToml = [
+						'name = "custom-reviewer"',
+						'description = "user-managed reviewer"',
+						'skill_ref = "custom-reviewer"',
+						"",
+					].join("\n");
+					await writeFile(customAgentPath, customAgentToml);
+					await writeFile(
+						generatedAgentPath,
+						[
+							"# oh-my-codex agent: ghost",
+							'name = "ghost"',
+							'description = "obsolete generated reviewer"',
+							'skill_ref = "ghost"',
+							"",
+						].join("\n"),
+					);
+
+					await setup({ scope: "user", installMode: "plugin" });
+
+					assert.equal(await readFile(customAgentPath, "utf-8"), customAgentToml);
+					assert.equal(existsSync(generatedAgentPath), false);
 				});
 			});
 		} finally {

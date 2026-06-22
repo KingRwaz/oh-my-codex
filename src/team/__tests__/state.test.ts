@@ -44,6 +44,7 @@ import {
   readDispatchRequest,
   readMonitorSnapshot,
   resolveDispatchLockTimeoutMs,
+  writeTeamManifestV2,
 } from '../state.js';
 import { normalizeDispatchRequest } from '../state/dispatch.js';
 
@@ -300,6 +301,32 @@ describe('team state', () => {
 
       const m2 = await migrateV1ToV2('team-mig', cwd);
       assert.deepEqual(m2, onDisk1);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('backfills missing or blank tmux pane owner ids in legacy manifests', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-pane-owner-backfill-'));
+    try {
+      await initTeamState('team-pane-owner-backfill', 't', 'executor', 1, cwd);
+      const manifestPath = join(cwd, '.omx', 'state', 'team', 'team-pane-owner-backfill', 'manifest.v2.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+      delete manifest.tmux_pane_owner_id;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+      const loadedManifest = await readTeamManifestV2('team-pane-owner-backfill', cwd);
+      const loadedConfig = await readTeamConfig('team-pane-owner-backfill', cwd);
+      assert.equal(loadedManifest?.tmux_pane_owner_id, 'team:team-pane-owner-backfill');
+      assert.equal(loadedConfig?.tmux_pane_owner_id, 'team:team-pane-owner-backfill');
+
+      await writeTeamManifestV2({
+        ...loadedManifest!,
+        tmux_pane_owner_id: '   ',
+      }, cwd);
+
+      const blankNormalized = await readTeamManifestV2('team-pane-owner-backfill', cwd);
+      assert.equal(blankNormalized?.tmux_pane_owner_id, 'team:team-pane-owner-backfill');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -756,6 +783,21 @@ exit 1
       const t = await createTask('team-owner-write-fail', { subject: 'a', description: 'd', status: 'pending' }, cwd);
 
       previousUmask = process.umask(0o222);
+      const probeDir = join(cwd, 'claim-lock-permission-probe');
+      await mkdir(probeDir);
+      try {
+        await writeFile(join(probeDir, 'owner'), 'probe');
+        // Root and some permissive filesystems can still write through the
+        // umask-created non-writable directory, so this failure mode cannot be
+        // exercised deterministically in that environment.
+        return;
+      } catch {
+        // Expected on normal non-root POSIX filesystems; continue with the
+        // claim-lock cleanup assertion below.
+      } finally {
+        await rm(probeDir, { recursive: true, force: true });
+      }
+
       await assert.rejects(
         () => claimTask('team-owner-write-fail', t.id, 'worker-1', t.version ?? 1, cwd),
         /(EACCES|EPERM|permission denied)/i,
@@ -1062,6 +1104,101 @@ exit 1
 
       assert.equal(completed.ok, true);
       assert.equal(completed.task.delegation_compliance?.status, 'skipped');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('transitionTaskStatus rejects coordinated completion without boundary evidence', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-coordination-evidence-'));
+    try {
+      await initTeamState('team-coordination-evidence', 't', 'executor', 1, cwd);
+      const t = await createTask('team-coordination-evidence', {
+        subject: 'Integrate shared runtime and tests',
+        description: 'Coordinate a handoff across shared runtime boundaries.',
+        status: 'pending',
+        coordination: {
+          mode: 'coordinated',
+          activation_reasons: ['cross_boundary_or_handoff_language'],
+          required_mechanisms: ['shared_mental_model', 'closed_loop_communication'],
+        },
+      }, cwd);
+      const claim = await claimTask('team-coordination-evidence', t.id, 'worker-1', t.version ?? 1, cwd);
+      assert.equal(claim.ok, true);
+      if (!claim.ok) return;
+
+      const missing = await transitionTaskStatus(
+        'team-coordination-evidence',
+        t.id,
+        'in_progress',
+        'completed',
+        claim.claimToken,
+        cwd,
+        { result: 'Verification:\nPASS - focused regression' },
+      );
+
+      assert.equal(missing.ok, false);
+      assert.equal(missing.ok ? 'x' : missing.error, 'missing_coordination_compliance_evidence');
+
+      const completed = await transitionTaskStatus(
+        'team-coordination-evidence',
+        t.id,
+        'in_progress',
+        'completed',
+        claim.claimToken,
+        cwd,
+        {
+          result: [
+            'Verification:',
+            'PASS - focused regression',
+            'Coordination protocol: coordinated - shared runtime handoff and downstream boundary checks verified',
+          ].join('\n'),
+        },
+      );
+
+      assert.equal(completed.ok, true);
+      assert.equal(completed.task.coordination_compliance?.status, 'checked');
+      assert.equal(completed.task.coordination_compliance?.source, 'terminal_result');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('transitionTaskStatus accepts documented no-boundary rationale for coordinated tasks', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-coordination-no-boundary-'));
+    try {
+      await initTeamState('team-coordination-no-boundary', 't', 'executor', 1, cwd);
+      const t = await createTask('team-coordination-no-boundary', {
+        subject: 'Coordinate shared verification',
+        description: 'Original plan had a handoff, but implementation collapsed to one isolated check.',
+        status: 'pending',
+        coordination: {
+          mode: 'coordinated',
+          activation_reasons: ['cross_boundary_or_handoff_language'],
+        },
+      }, cwd);
+      const claim = await claimTask('team-coordination-no-boundary', t.id, 'worker-1', t.version ?? 1, cwd);
+      assert.equal(claim.ok, true);
+      if (!claim.ok) return;
+
+      const completed = await transitionTaskStatus(
+        'team-coordination-no-boundary',
+        t.id,
+        'in_progress',
+        'completed',
+        claim.claimToken,
+        cwd,
+        {
+          result: [
+            'Verification:',
+            'PASS - focused regression',
+            'Coordination protocol: no boundary handoff - scope collapsed before execution; no peer-facing artifact changed',
+          ].join('\n'),
+        },
+      );
+
+      assert.equal(completed.ok, true);
+      assert.equal(completed.task.coordination_compliance?.status, 'no_boundary_handoff');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

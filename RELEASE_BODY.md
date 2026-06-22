@@ -1,43 +1,66 @@
-# oh-my-codex 0.18.0
+# oh-my-codex 0.18.14
 
-`0.18.0` ships the OMX API gateway and a safer SparkShell/operator-runtime baseline after `0.17.3`. The release also closes the notify, Stop-hook, tmux, HUD, Windows MCP, and release-smoke blockers found while preparing the train.
+> Draft status: release-prep PR body source before tagging. Keep publication proof updates in `docs/qa/release-readiness-0.18.14.md` after PR CI, tag workflow, GitHub release creation, and npm publication.
+
+`0.18.14` is a patch release after `0.18.13` focused on safer workflow orchestration, clearer agent/model routing diagnostics, sturdier plugin/HUD/team behavior, and release-candidate hygiene from the current `origin/dev` delta. It preserves the existing CLI/package contract while tightening setup, hook, HUD, Team, Ralplan, Autopilot, Ultragoal, and plugin-bundle edge cases discovered after `0.18.13`.
 
 ## Highlights
 
-- **Local generation has an OMX-owned API path** — `omx api` exposes the local gateway used by OMX generation flows, with explicit real-private backend guidance and safer default auth behavior.
-- **SparkShell is safer and more observable** — summaries can diagnose team panes and cache observations while preserving passthrough contracts and keeping raw secrets out of summary prompts.
-- **Runtime loops are less sticky** — stale Ralph, ralplan, autoresearch-goal, MCP transport, and tmux diagnostic states no longer trigger erroneous loops after Stop/completion.
-- **Process-storm regressions are blocked** — recursive notify wrappers, `previousNotify` self-reference, fallback watcher respawns, and worker tmux rc fan-out are fixed.
-- **Team/HUD/Windows reliability improved** — wrapped tmux drafts are not treated as sent input, HUD resize hooks survive reflow, provider env vars reach direct tmux launches, and Windows MCP siblings avoid duplicate watchdog collisions.
+- **Agent/model routing is more transparent** — per-agent model overrides and model-routing launch diagnostics make selected roles, tiers, and launch arguments easier to inspect without changing the default operator contract.
+- **Planning and goal workflows are safer** — Ultragoal architecture invariants, completed Codex goal cleanup guidance, Ralplan freshness/approval checks, transition diagnostics, and supervised Autopilot review rework reduce stale or ambiguous workflow handoffs.
+- **Hooks and plugin packaging are sturdier** — native hook success handling, PreToolUse stdout/schema behavior, Windows hook command wrapping, dev plugin cache diagnostics, plugin AGENTS policy preservation, and bundled skill agent tier references are tightened.
+- **HUD and Team runtime behavior is cleaner** — stale Autopilot HUD reporting, cramped guard display, standalone pane-scoped HUD state, tmux paste-buffer cleanup, supervisor paste-buffer handling, worker AGENTS guidance preservation, and HUD pane ownership on shutdown are hardened.
+- **Doctor and resume discovery catch more local edge cases** — doctor detects root-owned repo artifacts, and resume search discovers madmax run histories.
 
 ## Fixes / compatibility
 
-- `omx api --help` and `omx sparkshell --help` are now covered by release smoke tests.
-- Real-private API mode remains experimental and explicitly opt-in; unauthenticated accidental startup is prevented by default token generation.
-- Team readiness semantics are preserved; the release removes false draft trust and runaway launch/fan-out behavior rather than weakening failure detection.
-- Lifecycle notification grouping remains tracked separately in #2353.
+- Existing CLI, plugin, native-agent, HUD, state, hook, package layout, and runtime contracts remain compatible with `0.18.13`.
+- The release keeps npm/package layout compatibility and updates root/plugin/Cargo metadata to `0.18.14`.
+- Open PRs #2902, #2856, #2840, #2839, and #2838 are deliberately excluded from this candidate unless already present in `origin/dev`; release prep confirmed they remain open and `BEHIND` on `dev`.
 
-## Merged PR inventory
+## Merged PR / commit inventory
 
-#2295, #2332, #2334, #2335, #2338, #2339, #2341, #2342, #2344, #2345, #2347, #2349, #2351, #2357, #2359, #2360, #2361, #2365, #2367, #2372, #2374, #2375, #2376.
+Primary merged PR and commit evidence in the current `origin/main..origin/dev` candidate includes:
+
+- #2912 — Bundle skill agent tier references.
+- #2906 — Fix HUD stale Autopilot reporting.
+- #2905 — Clarify goal and skill workflow guidance.
+- #2900 — Add model routing launch diagnostics.
+- #2899 — Preserve AGENTS guidance in Team worker worktrees.
+- #2897 — Detect root-owned repo artifacts in doctor.
+- #2896 — Fix HUD cramped guard and tmux buffer cleanup.
+- #2895 — Preserve PreToolUse planning guard output.
+- #2894 — Make completed Codex goal cleanup explicit.
+- #2889 — Harden dev plugin cache diagnostics.
+- #2888 — Fix PreToolUse native hook stdout schema.
+- #2884 — Fix Ralplan consensus gate approval and freshness checks.
+- #2879 — Fix Ralplan guard and HUD phase authority.
+- #2878 — Fix stale Autopilot stop state.
+- #2877 — Preserve plugin AGENTS policy blocks during setup.
+- #2875 — Allow Beads tracker metadata during planning.
+- #2874 — Keep native hooks successful on null output.
+- #2873 — Harden tmux supervisor paste buffers.
+- #2861 — Keep standalone pane-scoped HUD stable.
+- #2859 — Avoid shell-wrapping Windows native hook node.
+- #2852 — Discover madmax run histories for resume search.
+- #2850 — Add per-agent model overrides.
+- #2848 — Add Ultragoal architecture invariant gate.
+- #2828 — Preserve HUD pane ownership on shutdown.
+- Direct commits — explain Ralplan transition validator diagnostics and add supervised Autopilot review rework phase.
 
 ## Validation
 
-- `npm run build`
-- `npm run lint`
-- `npm run check:no-unused`
-- Targeted compiled Node tests for version sync and the `omx api` CLI bridge
-- `npm run verify:native-agents`
-- `npm run verify:plugin-bundle`
-- `npm run build:full`
-- `npm run smoke:packed-install`
-- `cargo fmt --all --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test -p omx-api -p omx-sparkshell -p omx-explore-harness`
-- `git diff --check`
+Release readiness evidence is recorded in `docs/qa/release-readiness-0.18.14.md`.
+
+Release-prep gates include version sync for `v0.18.14`, build, native-agent verification, plugin mirror/bundle checks, catalog docs check, dogfooding of built CLI surfaces, `npm pack --dry-run`, and `git diff --check`. Branch CI, dev/main promotion, tag-triggered release workflow, GitHub release proof, and npm publication proof remain publication-stage gates.
+
+The GitHub release workflow remains the authoritative cross-platform native asset gate after tag push, including the uploaded `native-release-manifest.json`.
 
 ## Contributors
 
-Thanks to everyone who reported and narrowed the post-`0.17.3` runtime issues, especially the notify dispatcher recursion/fork-bomb reports, tmux fan-out/OOM repro, provider-env launch report, and compaction/reconciliation drift reports.
+Thanks to the contributors who landed the `v0.18.13...v0.18.14` delta:
 
-**Full Changelog**: https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.17.3...v0.18.0
+- [@Bellman](https://github.com/Bellman)
+- [@jihun-jeong](https://github.com/jihun-jeong)
+
+**Full Changelog**: [`v0.18.13...v0.18.14`](https://github.com/Yeachan-Heo/oh-my-codex/compare/v0.18.13...v0.18.14)

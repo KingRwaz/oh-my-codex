@@ -107,6 +107,31 @@ if [[ "\$cmd" == "capture-pane" ]]; then
   fi
   exit 0
 fi
+if [[ "\$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "\$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "\$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "\$#" -gt 0 ]]; do
+    case "\$1" in
+      -t) target="\$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "\$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "\$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -701,6 +726,31 @@ if [[ "$cmd" == "capture-pane" ]]; then
   printf "How can I help?\n› "
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -798,6 +848,31 @@ if [[ "$cmd" == "list-panes" ]]; then
 fi
 if [[ "$cmd" == "capture-pane" ]]; then
   printf "How can I help?\\n› "
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -900,6 +975,31 @@ if [[ "$cmd" == "capture-pane" ]]; then
   printf "How can I help?\\n› "
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -1000,6 +1100,31 @@ if [[ "$cmd" == "capture-pane" ]]; then
   printf "How can I help?\\n› "
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -1094,6 +1219,31 @@ if [[ "$cmd" == "list-panes" ]]; then
 fi
 if [[ "$cmd" == "capture-pane" ]]; then
   printf "How can I help?\\n› "
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -1245,6 +1395,31 @@ if [[ "$cmd" == "capture-pane" ]]; then
   printf "How can I help?\\n› "
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -1351,6 +1526,31 @@ if [[ "$cmd" == "capture-pane" ]]; then
   printf "Would you like me to continue?\\n"
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -1436,6 +1636,31 @@ shift || true
 fi
 if [[ "$cmd" == "capture-pane" ]]; then
   printf "› keep going\\n\\n• keep going\\n\\n› Implement {feature}\\n\\n  gpt-5.5 high · dev · 98%% left\\n"
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -1866,6 +2091,243 @@ exit 0
       const nudgeState = JSON.parse(await readFile(nudgeStatePath, 'utf-8'));
       assert.equal(nudgeState.nudgeCount, 1, 'nudge count should be 1');
       assert.ok(nudgeState.lastNudgeAt, 'should have lastNudgeAt timestamp');
+    });
+  });
+
+  it('does not reactivate completed autopilot from terminal turn replay', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const omxDir = join(cwd, '.omx');
+      const stateDir = join(omxDir, 'state');
+      const logsDir = join(omxDir, 'logs');
+      const codexHome = join(cwd, 'codex-home');
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const sessionStateDir = join(stateDir, 'sessions', 'sess-managed');
+      const terminalCompletedAt = '2026-05-31T20:24:39.005Z';
+
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(sessionStateDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+
+      await writeJson(join(codexHome, '.omx-config.json'), {
+        autoNudge: { enabled: true, delaySec: 0, stallMs: 0 },
+      });
+      await writeManagedSessionState(stateDir, cwd);
+      await writeJson(join(sessionStateDir, 'autopilot-state.json'), {
+        mode: 'autopilot',
+        active: false,
+        current_phase: 'complete',
+        completed_at: terminalCompletedAt,
+        stop_reason: 'completed',
+        session_id: 'sess-managed',
+        thread_id: 'thread-autopilot-complete',
+        turn_id: 'turn-autopilot-complete',
+        iteration: 7,
+        max_iterations: 10,
+        review_cycle: 1,
+      });
+      await writeJson(join(sessionStateDir, 'skill-active-state.json'), {
+        version: 1,
+        active: false,
+        skill: 'autopilot',
+        keyword: '$autopilot',
+        phase: 'completing',
+        activated_at: '2026-05-31T19:28:04.651Z',
+        updated_at: terminalCompletedAt,
+        source: 'keyword-detector',
+        session_id: 'sess-managed',
+        thread_id: 'thread-autopilot-complete',
+        turn_id: 'turn-autopilot-complete',
+        active_skills: [],
+      });
+
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(join(cwd, 'tmux.log')));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      const result = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        type: 'agent-turn-complete',
+        'thread-id': 'thread-autopilot-complete',
+        'turn-id': 'turn-autopilot-complete',
+        'input-messages': ['$autopilot .omx/specs/hermes-intake-librarian-subagent-mcp.md'],
+        'last-assistant-message': 'Autopilot complete. Committed:\n- 93302d4b2 enable profile-scoped MCP delegation without leaking tools',
+      });
+      assert.equal(result.status, 0, `hook failed: ${result.stderr || result.stdout}`);
+
+      const autopilotState = JSON.parse(await readFile(join(sessionStateDir, 'autopilot-state.json'), 'utf-8')) as {
+        active: boolean;
+        current_phase: string;
+        completed_at?: string;
+        started_at?: string;
+        iteration?: number;
+      };
+      assert.equal(autopilotState.active, false);
+      assert.equal(autopilotState.current_phase, 'complete');
+      assert.equal(autopilotState.completed_at, terminalCompletedAt);
+      assert.equal(autopilotState.started_at, undefined);
+      assert.equal(autopilotState.iteration, 7);
+
+      const skillState = JSON.parse(await readFile(join(sessionStateDir, 'skill-active-state.json'), 'utf-8')) as {
+        active: boolean;
+        phase: string;
+        active_skills?: unknown[];
+      };
+      assert.equal(skillState.active, false);
+      assert.equal(skillState.phase, 'completing');
+      assert.equal(skillState.active_skills?.length ?? 0, 0);
+    });
+  });
+
+  it('does not reactivate completed autopilot from canonical terminal replay wording', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const omxDir = join(cwd, '.omx');
+      const stateDir = join(omxDir, 'state');
+      const logsDir = join(omxDir, 'logs');
+      const codexHome = join(cwd, 'codex-home');
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const sessionStateDir = join(stateDir, 'sessions', 'sess-managed');
+      const terminalCompletedAt = '2026-05-31T20:24:39.005Z';
+
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(sessionStateDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+
+      await writeJson(join(codexHome, '.omx-config.json'), {
+        autoNudge: { enabled: true, delaySec: 0, stallMs: 0 },
+      });
+      await writeManagedSessionState(stateDir, cwd);
+      await writeJson(join(sessionStateDir, 'autopilot-state.json'), {
+        mode: 'autopilot',
+        active: false,
+        current_phase: 'complete',
+        completed_at: terminalCompletedAt,
+        thread_id: 'thread-autopilot-complete',
+        turn_id: 'turn-autopilot-complete',
+      });
+
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(join(cwd, 'tmux.log')));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      const result = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        type: 'agent-turn-complete',
+        'thread-id': 'thread-autopilot-complete',
+        'turn-id': 'turn-autopilot-complete',
+        'input-messages': ['autopilot mode'],
+        'last-assistant-message': 'Autopilot completed successfully.',
+      });
+      assert.equal(result.status, 0, `hook failed: ${result.stderr || result.stdout}`);
+
+      const autopilotState = JSON.parse(await readFile(join(sessionStateDir, 'autopilot-state.json'), 'utf-8')) as {
+        active: boolean;
+        current_phase: string;
+        completed_at?: string;
+      };
+      assert.equal(autopilotState.active, false);
+      assert.equal(autopilotState.current_phase, 'complete');
+      assert.equal(autopilotState.completed_at, terminalCompletedAt);
+    });
+  });
+
+  it('does not reactivate completed autopilot from registry-alias terminal replay', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const omxDir = join(cwd, '.omx');
+      const stateDir = join(omxDir, 'state');
+      const logsDir = join(omxDir, 'logs');
+      const codexHome = join(cwd, 'codex-home');
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const sessionStateDir = join(stateDir, 'sessions', 'sess-managed');
+      const terminalCompletedAt = '2026-05-31T20:24:39.005Z';
+
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(sessionStateDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+
+      await writeJson(join(codexHome, '.omx-config.json'), {
+        autoNudge: { enabled: true, delaySec: 0, stallMs: 0 },
+      });
+      await writeManagedSessionState(stateDir, cwd);
+      await writeJson(join(sessionStateDir, 'autopilot-state.json'), {
+        mode: 'autopilot',
+        active: false,
+        current_phase: 'complete',
+        completed_at: terminalCompletedAt,
+        thread_id: 'thread-autopilot-complete',
+        turn_id: 'turn-autopilot-complete',
+      });
+
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(join(cwd, 'tmux.log')));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      const result = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        type: 'agent-turn-complete',
+        'thread-id': 'thread-autopilot-complete',
+        'turn-id': 'turn-autopilot-complete',
+        'input-messages': ['build me a terminal replay regression guard'],
+        'last-assistant-message': 'Autopilot complete. Regression guard shipped.',
+      });
+      assert.equal(result.status, 0, `hook failed: ${result.stderr || result.stdout}`);
+
+      const autopilotState = JSON.parse(await readFile(join(sessionStateDir, 'autopilot-state.json'), 'utf-8')) as {
+        active: boolean;
+        current_phase: string;
+        completed_at?: string;
+      };
+      assert.equal(autopilotState.active, false);
+      assert.equal(autopilotState.current_phase, 'complete');
+      assert.equal(autopilotState.completed_at, terminalCompletedAt);
+    });
+  });
+
+  it('allows a later autopilot prompt after completed autopilot state', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const omxDir = join(cwd, '.omx');
+      const stateDir = join(omxDir, 'state');
+      const logsDir = join(omxDir, 'logs');
+      const codexHome = join(cwd, 'codex-home');
+      const fakeBinDir = join(cwd, 'fake-bin');
+      const sessionStateDir = join(stateDir, 'sessions', 'sess-managed');
+
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(sessionStateDir, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await mkdir(fakeBinDir, { recursive: true });
+
+      await writeJson(join(codexHome, '.omx-config.json'), {
+        autoNudge: { enabled: true, delaySec: 0, stallMs: 0 },
+      });
+      await writeManagedSessionState(stateDir, cwd);
+      await writeJson(join(sessionStateDir, 'autopilot-state.json'), {
+        mode: 'autopilot',
+        active: false,
+        current_phase: 'complete',
+        completed_at: '2026-05-31T20:24:39.005Z',
+        thread_id: 'thread-autopilot-complete',
+        turn_id: 'turn-autopilot-complete',
+      });
+
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(join(cwd, 'tmux.log')));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+
+      const result = runNotifyHook(cwd, fakeBinDir, codexHome, {
+        type: 'agent-turn-complete',
+        'thread-id': 'thread-autopilot-complete',
+        'turn-id': 'turn-later-autopilot-start',
+        'input-messages': ['$autopilot .omx/specs/next-task.md'],
+        'last-assistant-message': 'Autopilot complete replay text from a different turn should not suppress this activation.',
+      });
+      assert.equal(result.status, 0, `hook failed: ${result.stderr || result.stdout}`);
+
+      const autopilotState = JSON.parse(await readFile(join(sessionStateDir, 'autopilot-state.json'), 'utf-8')) as {
+        active: boolean;
+        current_phase: string;
+        completed_at?: string;
+        turn_id?: string;
+      };
+      assert.equal(autopilotState.active, true);
+      assert.equal(autopilotState.current_phase, 'deep-interview');
+      assert.equal(autopilotState.completed_at, undefined);
+      assert.equal(autopilotState.turn_id, 'turn-later-autopilot-start');
     });
   });
 

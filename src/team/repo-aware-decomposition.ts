@@ -64,6 +64,10 @@ export interface RepoAwareTeamExecutionPlan {
   workerCount: number;
   tasks: RepoAwareTask[];
   metadata?: TeamDecompositionMetadata;
+  overOrchestrationNotice?: {
+    code: 'team_over_orchestration_warning' | 'explicit_team_override_acknowledged';
+    message: string;
+  };
 }
 
 const DEFAULT_MAX_WORKERS = 20;

@@ -32,6 +32,25 @@ export interface UltragoalCheckpointGuidance {
   };
 }
 
+export type UltragoalContextResolutionStatus =
+  | 'valid'
+  | 'missing'
+  | 'malformed'
+  | 'completed'
+  | 'mismatched'
+  | 'stale';
+
+export interface UltragoalContextWarning {
+  code: UltragoalContextResolutionStatus;
+  message: string;
+}
+
+export interface UltragoalContextResolution {
+  status: UltragoalContextResolutionStatus;
+  context: UltragoalTeamContext | null;
+  warning?: UltragoalContextWarning;
+}
+
 const ULTRAGOAL_GOAL_ID_SAFE_PATTERN = /^G\d{3}[-\w]*$/;
 
 export function isSafeUltragoalGoalId(value: string): boolean {
@@ -92,32 +111,46 @@ export function normalizeUltragoalTeamContext(value: unknown): UltragoalTeamCont
 }
 
 export async function resolveLeaderOwnedUltragoalContext(cwd: string): Promise<UltragoalTeamContext | null> {
+  const outcome = await resolveLeaderOwnedUltragoalContextOutcome(cwd);
+  if (outcome.status === 'valid') return outcome.context;
+  if (outcome.status === 'missing') return null;
+  throw new Error(`invalid_ultragoal_team_context:${outcome.warning?.message ?? outcome.status}`);
+}
+
+function warning(code: UltragoalContextResolutionStatus, message: string): UltragoalContextResolution {
+  return { status: code, context: null, warning: { code, message } };
+}
+
+export async function resolveLeaderOwnedUltragoalContextOutcome(cwd: string): Promise<UltragoalContextResolution> {
   const goalsJsonPath = join(cwd, '.omx', 'ultragoal', 'goals.json');
-  if (!existsSync(goalsJsonPath)) return null;
+  if (!existsSync(goalsJsonPath)) return { status: 'missing', context: null };
 
   try {
     const parsed = JSON.parse(await readFile(goalsJsonPath, 'utf-8')) as Record<string, unknown>;
     const activeGoalId = typeof parsed.activeGoalId === 'string' ? parsed.activeGoalId.trim() : '';
     if (activeGoalId === '') {
-      return null;
+      return { status: 'missing', context: null };
     }
     if (!isSafeUltragoalGoalId(activeGoalId)) {
-      throw new InvalidUltragoalTeamContextError(`unsafe_active_goal_id:${activeGoalId}`);
+      return warning('malformed', `unsafe_active_goal_id:${activeGoalId}`);
     }
     const goals = Array.isArray(parsed.goals) ? parsed.goals : [];
     const activeGoal = goals.find((goal) =>
       goal && typeof goal === 'object' && (goal as Record<string, unknown>).id === activeGoalId,
     ) as Record<string, unknown> | undefined;
     if (!activeGoal) {
-      throw new InvalidUltragoalTeamContextError(`active_goal_not_found:${activeGoalId}`);
+      return warning('mismatched', `active_goal_not_found:${activeGoalId}`);
     }
     if (activeGoal.status !== 'in_progress') {
-      throw new InvalidUltragoalTeamContextError(`active_goal_not_in_progress:${activeGoalId}`);
+      return warning(
+        activeGoal.status === 'complete' ? 'completed' : 'stale',
+        `active_goal_not_in_progress:${activeGoalId}`,
+      );
     }
     const activeGoalTitle = typeof activeGoal?.title === 'string' && activeGoal.title.trim() !== ''
       ? activeGoal.title.trim()
       : undefined;
-    return {
+    const context: UltragoalTeamContext = {
       kind: 'leader_owned_ultragoal_context',
       goalsPath: '.omx/ultragoal/goals.json',
       ledgerPath: '.omx/ultragoal/ledger.jsonl',
@@ -126,12 +159,30 @@ export async function resolveLeaderOwnedUltragoalContext(cwd: string): Promise<U
       codexGoalMode: resolvePlanCodexGoalMode(parsed.codexGoalMode),
       checkpointPolicy: 'fresh_leader_get_goal_required',
     };
+    return { status: 'valid', context };
   } catch (error) {
     if (error instanceof InvalidUltragoalTeamContextError) {
-      throw new Error(`invalid_ultragoal_team_context:${error.message}`);
+      return warning('malformed', error.message);
     }
-    throw new Error(`invalid_ultragoal_team_context:malformed_goals_json`);
+    return warning('malformed', 'malformed_goals_json');
   }
+}
+
+export async function reconcilePersistedTeamUltragoalContext(
+  cwd: string,
+  persisted: UltragoalTeamContext | null | undefined,
+): Promise<UltragoalContextResolution> {
+  const normalized = normalizeUltragoalTeamContext(persisted);
+  if (!normalized) return { status: 'missing', context: null };
+  const current = await resolveLeaderOwnedUltragoalContextOutcome(cwd);
+  if (current.status !== 'valid' || !current.context) return current;
+  if (current.context.activeGoalId !== normalized.activeGoalId) {
+    return warning(
+      'mismatched',
+      `persisted_goal_mismatch:${normalized.activeGoalId}:current:${current.context.activeGoalId}`,
+    );
+  }
+  return current;
 }
 
 export async function writePersistedTeamUltragoalContext(

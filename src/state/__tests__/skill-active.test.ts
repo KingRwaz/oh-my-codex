@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -175,6 +175,147 @@ describe('skill-active state helpers', () => {
       const rootState = JSON.parse(await readFile(join(cwd, '.omx', 'state', 'skill-active-state.json'), 'utf-8')) as Record<string, unknown>;
       assert.equal(rootState.initialized_mode, 'ralph');
       assert.equal(rootState.initialized_state_path, '.omx/state/sessions/old-session/ralph-state.json');
+    });
+  });
+
+  it('does not synthesize session root mirror fallback from top-level skill fields', async () => {
+    await withTempRepo('omx-skill-active-root-top-level-only-', async (cwd) => {
+      const stateDir = join(cwd, '.omx', 'state');
+      await mkdir(stateDir, { recursive: true });
+      await writeFile(join(stateDir, 'skill-active-state.json'), JSON.stringify({
+        version: 1,
+        active: true,
+        skill: 'autopilot',
+        phase: 'deep-interview',
+        session_id: 'current-session',
+      }));
+
+      const sessionState = await readVisibleSkillActiveState(cwd, 'current-session');
+
+      assert.equal(sessionState, null);
+    });
+  });
+
+  it('returns null for a missing session skill-active file even when the root mirror is active', async () => {
+    await withTempRepo('omx-skill-active-root-mirror-missing-session-', async (cwd) => {
+      const stateDir = join(cwd, '.omx', 'state');
+      await mkdir(stateDir, { recursive: true });
+      await writeFile(join(stateDir, 'skill-active-state.json'), JSON.stringify({
+        version: 1,
+        active: true,
+        skill: 'autopilot',
+        phase: 'deep-interview',
+        initialized_mode: 'ralph',
+        initialized_state_path: '.omx/state/sessions/stale-session/ralph-state.json',
+        owner_omx_session_id: 'stale-session',
+        owner_codex_session_id: 'stale-codex-session',
+        owner_codex_thread_id: 'stale-thread',
+        task_slug: 'stale-task',
+        context_snapshot_path: '.omx/context/stale.md',
+        session_id: 'stale-session',
+        active_skills: [{
+          skill: 'autopilot',
+          phase: 'deep-interview',
+          active: true,
+          session_id: 'current-session',
+          thread_id: 'current-thread',
+          turn_id: 'current-turn',
+        }],
+      }));
+
+      const sessionState = await readVisibleSkillActiveState(cwd, 'current-session');
+
+      assert.equal(sessionState, null);
+    });
+  });
+
+  it('does not treat active_skills as active when the canonical state is terminal', async () => {
+    await withTempRepo('omx-skill-active-terminal-overrides-entries-', async (cwd) => {
+      await mkdir(join(cwd, '.omx', 'state', 'sessions', 'sess-terminal'), { recursive: true });
+      await writeFile(join(cwd, '.omx', 'state', 'sessions', 'sess-terminal', 'skill-active-state.json'), JSON.stringify({
+        version: 1,
+        active: false,
+        skill: 'autopilot',
+        phase: 'blocked_on_user',
+        completed_at: '2026-06-09T00:00:00.000Z',
+        session_id: 'sess-terminal',
+        active_skills: [{
+          skill: 'autopilot',
+          phase: 'deep-interview',
+          active: true,
+          session_id: 'sess-terminal',
+        }],
+      }, null, 2));
+
+      const sessionState = await readVisibleSkillActiveState(cwd, 'sess-terminal');
+
+      assert.ok(sessionState);
+      assert.equal(sessionState.active, false);
+      assert.deepEqual(listActiveSkills(sessionState), []);
+    });
+  });
+
+  it('clears stale terminal markers when a workflow is reactivated', async () => {
+    await withTempRepo('omx-skill-active-reactivate-terminal-', async (cwd) => {
+      await mkdir(join(cwd, '.omx', 'state'), { recursive: true });
+      await writeSkillActiveStateCopies(cwd, {
+        active: false,
+        skill: 'autopilot',
+        phase: 'complete',
+        completed_at: '2026-06-09T00:00:00.000Z',
+        cancel_reason: 'old cancellation',
+        run_outcome: 'finish',
+        lifecycle_outcome: 'complete',
+        session_id: 'sess-reactivate',
+        active_skills: [{ skill: 'autopilot', phase: 'complete', active: true, session_id: 'sess-reactivate' }],
+      }, 'sess-reactivate');
+
+      await syncCanonicalSkillStateForMode({
+        cwd,
+        mode: 'autopilot',
+        active: true,
+        sessionId: 'sess-reactivate',
+        nowIso: '2026-06-09T00:01:00.000Z',
+      });
+
+      const sessionState = await readVisibleSkillActiveState(cwd, 'sess-reactivate');
+      assert.ok(sessionState);
+      assert.equal(sessionState.active, true);
+      assert.equal(sessionState.phase, '');
+      assert.equal(sessionState.completed_at, undefined);
+      assert.equal(sessionState.cancel_reason, undefined);
+      assert.equal(sessionState.run_outcome, undefined);
+      assert.equal(sessionState.lifecycle_outcome, undefined);
+      assert.deepEqual(listActiveSkills(sessionState).map(({ skill, phase, session_id }) => ({ skill, phase, session_id })), [
+        { skill: 'autopilot', phase: undefined, session_id: 'sess-reactivate' },
+      ]);
+    });
+  });
+
+  it('recognizes runtime terminal outcomes when suppressing stale active entries', async () => {
+    await withTempRepo('omx-skill-active-terminal-outcomes-', async (cwd) => {
+      await mkdir(join(cwd, '.omx', 'state', 'sessions', 'sess-terminal-outcome'), { recursive: true });
+      const cases = [
+        { run_outcome: 'blocked_on_user' },
+        { lifecycle_outcome: 'blocked' },
+        { lifecycle_outcome: 'userinterlude' },
+        { lifecycle_outcome: 'askuserQuestion' },
+        { completed_at: '2026-06-09T00:00:00.000Z' },
+        { phase: 'blocked_on_user' },
+      ];
+
+      for (const [index, terminalFields] of cases.entries()) {
+        const state = {
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          phase: 'ralplan',
+          session_id: `sess-terminal-outcome-${index}`,
+          active_skills: [{ skill: 'autopilot', phase: 'ralplan', active: true, session_id: `sess-terminal-outcome-${index}` }],
+          ...terminalFields,
+        };
+        assert.deepEqual(listActiveSkills(state), []);
+      }
     });
   });
 

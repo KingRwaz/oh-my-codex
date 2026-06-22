@@ -16,7 +16,7 @@ omx exec --skip-git-repo-check -C . "Reply with exactly OMX-EXEC-OK"
 Treat the boundary this way:
 
 - Codex plugin install/discovery may cache `oh-my-codex` under `${CODEX_HOME:-~/.codex}/plugins/cache/$MARKETPLACE_NAME/oh-my-codex/$VERSION/` (with `local` possible as a version identifier for local installs). That confirms a marketplace/plugin artifact; the packaged plugin includes plugin-scoped companion metadata for MCP servers and apps, while native/runtime hooks remain setup-owned, so it is still not the full OMX runtime setup.
-- Plugin install/discovery is not a replacement for `npm install -g oh-my-codex` plus `omx setup`; legacy setup mode installs native agents and prompts, while plugin setup mode relies on plugin discovery for bundled skills and archives/removes legacy OMX-managed prompts/native-agent TOMLs so stale role files cannot shadow plugin behavior.
+- Plugin install/discovery is not a replacement for `npm install -g oh-my-codex` plus `omx setup`; legacy setup mode installs native agents and prompts, while plugin setup mode relies on plugin discovery for bundled skills, archives/removes legacy OMX-managed prompts/skills, and refreshes setup-owned native agent TOMLs so `agent_type` roles remain available without stale generated role files.
 - `omx doctor` green: install and local runtime wiring look sane.
 - `codex login status` green: the active Codex profile can see login state.
 - `omx exec ...` returns `OMX-EXEC-OK`: real execution, auth, provider routing, and current working-directory assumptions are working together.
@@ -54,6 +54,18 @@ openai_base_url = "http://localhost:8317/v1"
 ```
 
 Use your actual proxy URL. If the profile-local `~/.codex/config.toml` is missing `openai_base_url`, Codex may send the proxy-issued key to the default endpoint. That can make setup and doctor look fine while real execution fails with 401-style auth errors.
+
+## Root-owned or non-writable repo artifacts
+
+OMX runtime and planning artifacts under repo-local `.omx/` and `.beads/` should be writable by the same operating-system user that runs `omx`. Files created through `sudo`, containers, or service users can become `root:root` or otherwise non-writable, which later blocks normal agents from appending plans, state, logs, or context artifacts.
+
+`omx doctor` scans `.omx/` and `.beads/` when they exist and reports exact root-owned, owner-mismatched, or non-writable paths. The safe manual repair is:
+
+```bash
+sudo chown -R $(id -u):$(id -g) <repo>
+```
+
+Use the repository root for `<repo>`. `omx doctor --force` attempts automatic ownership repair only when the repo root is owned by the invoking user; otherwise it leaves files unchanged and prints manual remediation guidance.
 
 ## Stale `doctor --team` or dead tmux session state
 
@@ -122,11 +134,11 @@ Adjust the terminal pattern if your client advertises a different terminfo name.
 - **Close as environment limitation** if current `dev` sets the tmux option correctly but the reporter's terminal path still does not forward the richer key event.
 - **Prefer a docs follow-up** when the root problem is discoverability/operator guidance rather than a broken OMX codepath.
 
-## `omx explore` fallback boundaries
+## `omx explore` is hard-deprecated
 
-`omx explore` has two intentionally bounded fallback paths:
+`omx explore` is hard-deprecated and its direct command surface has been removed. Invoking it now fails intentionally; only `omx explore --help` still prints migration guidance.
 
-- **Sparkshell backend fallback**: qualifying shell-native prompts (for example `git log --oneline`) try `omx sparkshell` first. If that backend is unavailable or incompatible, stderr reports `sparkshell backend unavailable ... Falling back to the explore harness` before the harness runs.
-- **Model fallback inside the explore harness**: the harness tries the configured spark model first and then the configured fallback/standard model only if spark fails. This changes the cost/behavior boundary, so stderr emits structured attempt metadata such as `fallback-attempt=model from=... to=... reason=spark_attempt_failed exit=...`. The stdout notice `## OMX Explore fallback` is emitted only after successful fallback output.
+- For read-only repository lookups, use the normal Codex repository inspection tools/subagents.
+- For explicit shell-native read-only evidence or `--tmux-pane` summaries, use `omx sparkshell -- <command>`.
 
-A harness limitation is different from fallback. If the harness cannot answer safely (unsupported platform, missing native binary for a packaged install, missing Rust toolchain in a checkout, or a non-shell-only task), it should report the limitation and stop or ask the caller to use the richer normal path; it should not silently broaden tools or model behavior.
+The earlier explore harness fallback boundaries (sparkshell-backend fallback and in-harness model fallback) no longer apply to a user-facing command, because the command no longer runs a harness. Internal harness-resolution helpers remain only to support `omx doctor`/native-asset diagnostics.

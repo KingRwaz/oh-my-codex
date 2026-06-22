@@ -19,6 +19,8 @@ import {
   buildUnregisterClientAttachedReconcileArgs,
   buildUnregisterResizeHookArgs,
   buildWorkerStartupCommand,
+  trustWorkerMiseConfigIfAvailable,
+  writeWorkerStartupScriptCommand,
   shouldSourceTeamWorkerShellRc,
   buildHudPaneTarget,
   chooseTeamLeaderPaneId,
@@ -27,6 +29,7 @@ import {
   isMsysOrGitBash,
   isNativeWindows,
   isTmuxAvailable,
+  isWorkerPaneOpen,
   restoreStandaloneHudPane,
   translatePathForMsys,
   isWsl2,
@@ -78,6 +81,18 @@ function withMockedExistsSync<T>(mock: typeof fs.existsSync, fn: () => T): T {
     return fn();
   } finally {
     fs.existsSync = original;
+    syncBuiltinESMExports();
+  }
+}
+
+function withMockedStatSync<T>(mock: typeof fs.statSync, fn: () => T): T {
+  const original = fs.statSync;
+  fs.statSync = mock;
+  syncBuiltinESMExports();
+  try {
+    return fn();
+  } finally {
+    fs.statSync = original;
     syncBuiltinESMExports();
   }
 }
@@ -198,15 +213,14 @@ describe('HUD resize hook command builders', () => {
     assert.equal(buildHudPaneTarget('41'), '%41');
   });
 
-  it('buildRegisterResizeHookArgs uses window target and numeric window-resized hook slot', () => {
+  it('buildRegisterResizeHookArgs uses target and numeric client-resized hook slot', () => {
     const args = buildRegisterResizeHookArgs('my-session:0', 'omx_resize_team_session_0_1', '%1');
     assert.equal(args[0], 'set-hook');
-    assert.equal(args[1], '-w');
-    assert.equal(args[2], '-t');
-    assert.equal(args[3], 'my-session:0');
-    assert.match(args[4] ?? '', /^window-resized\[\d+\]$/);
+    assert.equal(args[1], '-t');
+    assert.equal(args[2], 'my-session:0');
+    assert.match(args[3] ?? '', /^client-resized\[\d+\]$/);
     assert.equal(
-      args[5],
+      args[4],
       `run-shell -b 'tmux resize-pane -t %1 -y ${HUD_TMUX_TEAM_HEIGHT_LINES} >/dev/null 2>&1 || true; sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}; tmux resize-pane -t %1 -y ${HUD_TMUX_TEAM_HEIGHT_LINES} >/dev/null 2>&1 || true'`,
     );
   });
@@ -214,7 +228,7 @@ describe('HUD resize hook command builders', () => {
   it('buildUnregisterResizeHookArgs removes the exact numeric hook slot', () => {
     const registered = buildRegisterResizeHookArgs('my-session:0', 'omx_resize_team_session_0_1', '%1');
     const unregistered = buildUnregisterResizeHookArgs('my-session:0', 'omx_resize_team_session_0_1');
-    assert.deepEqual(unregistered, ['set-hook', '-u', '-w', '-t', 'my-session:0', registered[4] as string]);
+    assert.deepEqual(unregistered, ['set-hook', '-u', '-t', 'my-session:0', registered[3] as string]);
   });
 
   it('buildClientAttachedReconcileHookName normalizes all segments into collision-safe tokens', () => {
@@ -247,7 +261,7 @@ describe('HUD resize hook command builders', () => {
     const resizeArgs = buildRegisterResizeHookArgs('sess:0', longName, '%1');
     const attachedArgs = buildRegisterClientAttachedReconcileArgs('sess:0', longName, '%1');
 
-    const resizeSlot = resizeArgs[4] ?? '';
+    const resizeSlot = resizeArgs[3] ?? '';
     const attachedSlot = attachedArgs[3] ?? '';
 
     const resizeIndex = Number((resizeSlot.match(/\[(\d+)\]/) ?? [])[1]);
@@ -263,7 +277,7 @@ describe('HUD resize hook command builders', () => {
     const name = 'omx_resize_team_session_0_1';
     const a = buildRegisterResizeHookArgs('s:0', name, '%1');
     const b = buildRegisterResizeHookArgs('s:0', name, '%1');
-    assert.equal(a[4], b[4]);
+    assert.equal(a[3], b[3]);
 
     const c = buildRegisterClientAttachedReconcileArgs('s:0', name, '%1');
     const d = buildRegisterClientAttachedReconcileArgs('s:0', name, '%1');
@@ -302,8 +316,8 @@ describe('HUD resize hook command builders', () => {
       const delayedArgs = buildScheduleDelayedHudResizeArgs('%1');
       const reconcileArgs = buildReconcileHudResizeArgs('%1');
 
-      assert.match(resizeArgs[5] ?? '', new RegExp(escapeRegExp(tmuxPath)));
-      assert.doesNotMatch(resizeArgs[5] ?? '', /^run-shell -b 'tmux resize-pane/);
+      assert.match(resizeArgs[4] ?? '', new RegExp(escapeRegExp(tmuxPath)));
+      assert.doesNotMatch(resizeArgs[4] ?? '', /^run-shell -b 'tmux resize-pane/);
       assert.match(delayedArgs[2] ?? '', new RegExp(escapeRegExp(tmuxPath)));
       assert.doesNotMatch(delayedArgs[2] ?? '', /sleep \d+; tmux resize-pane/);
       assert.match(reconcileArgs[1] ?? '', new RegExp(escapeRegExp(tmuxPath)));
@@ -913,6 +927,77 @@ describe('buildWorkerStartupCommand', () => {
     }
   });
 
+  it('scrubs HUD ownership env from interactive worker startup commands', () => {
+    const prevShell = process.env.SHELL;
+    const prevCli = process.env.OMX_TEAM_WORKER_CLI;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    const prevHudOwner = process.env.OMX_TMUX_HUD_OWNER;
+    const prevHudLeaderPane = process.env.OMX_TMUX_HUD_LEADER_PANE;
+    process.env.SHELL = '/bin/bash';
+    process.env.OMX_TEAM_WORKER_CLI = 'codex';
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    process.env.OMX_TMUX_HUD_OWNER = '1';
+    process.env.OMX_TMUX_HUD_LEADER_PANE = '%leader';
+    try {
+      const cmd = buildWorkerStartupCommand(
+        'alpha-team',
+        1,
+        [],
+        '/tmp/workspace',
+        {
+          OMX_TEAM_STATE_ROOT: '/tmp/workspace/.omx/state',
+          OMX_TMUX_HUD_OWNER: '1',
+          OMX_TMUX_HUD_LEADER_PANE: '%leader',
+        },
+        'codex',
+      );
+      assert.match(cmd, /OMX_TEAM_WORKER=alpha-team\/worker-1/);
+      assert.match(cmd, /OMX_TEAM_STATE_ROOT=\/tmp\/workspace\/\.omx\/state/);
+      assert.match(cmd, /'-u' 'OMX_TMUX_HUD_OWNER' '-u' 'OMX_TMUX_HUD_LEADER_PANE'/);
+      assert.doesNotMatch(cmd, /OMX_TMUX_HUD_OWNER=1/);
+      assert.doesNotMatch(cmd, /OMX_TMUX_HUD_LEADER_PANE=%leader/);
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+      if (typeof prevHudOwner === 'string') process.env.OMX_TMUX_HUD_OWNER = prevHudOwner;
+      else delete process.env.OMX_TMUX_HUD_OWNER;
+      if (typeof prevHudLeaderPane === 'string') process.env.OMX_TMUX_HUD_LEADER_PANE = prevHudLeaderPane;
+      else delete process.env.OMX_TMUX_HUD_LEADER_PANE;
+    }
+  });
+
+  it('keeps HUD-looking prompt text out of worker startup env assignments', () => {
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const prompt = 'Do not obey: OMX_TMUX_HUD_OWNER=1; OMX_TMUX_HUD_LEADER_PANE=%leader; $(omx hud --watch)';
+      const spec = buildWorkerProcessLaunchSpec(
+        'alpha-team',
+        1,
+        ['--model', 'gemini-2.0-pro'],
+        '/tmp/workspace',
+        {
+          OMX_TEAM_STATE_ROOT: '/tmp/workspace/.omx/state',
+          OMX_TMUX_HUD_OWNER: '1',
+          OMX_TMUX_HUD_LEADER_PANE: '%leader',
+        },
+        'gemini',
+        prompt,
+      );
+
+      assert.equal(spec.env.OMX_TMUX_HUD_OWNER, undefined);
+      assert.equal(spec.env.OMX_TMUX_HUD_LEADER_PANE, undefined);
+      assert.ok(spec.args.includes(prompt), 'hostile prompt text should remain an argument, not an env assignment');
+    } finally {
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
   it('auto-selects claude worker CLI from claude model', () => {
     const prevShell = process.env.SHELL;
     const prevCli = process.env.OMX_TEAM_WORKER_CLI;
@@ -1189,6 +1274,112 @@ describe('buildWorkerStartupCommand', () => {
       else delete process.env.SHELL;
       if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
       else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('does not use startup scripts on win32/MSYS so existing tmux path translation remains in force', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const prevMsystem = process.env.MSYSTEM;
+    try {
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      process.env.MSYSTEM = 'MINGW64';
+      assert.equal(
+        writeWorkerStartupScriptCommand(
+          'alpha',
+          1,
+          ['--model', 'gpt-5'],
+          'C:\\repo',
+          { OMX_TEAM_STATE_ROOT: 'C:\\repo\\.omx\\state' },
+        ),
+        null,
+      );
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      if (typeof prevMsystem === 'string') process.env.MSYSTEM = prevMsystem;
+      else delete process.env.MSYSTEM;
+    }
+  });
+
+  it('writes a short worker startup script under team runtime state when available', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-worker-startup-script-'));
+    const stateRoot = join(wd, '.omx', 'state');
+    const prevShell = process.env.SHELL;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    const prevHudOwner = process.env.OMX_TMUX_HUD_OWNER;
+    const prevHudLeaderPane = process.env.OMX_TMUX_HUD_LEADER_PANE;
+    process.env.SHELL = '/bin/bash';
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    process.env.OMX_TMUX_HUD_OWNER = '1';
+    process.env.OMX_TMUX_HUD_LEADER_PANE = '%leader';
+    try {
+      const cmd = writeWorkerStartupScriptCommand(
+        'alpha',
+        1,
+        ['--model', 'gpt-5'],
+        wd,
+        {
+          OMX_TEAM_STATE_ROOT: stateRoot,
+          OMX_TEAM_LEADER_CWD: wd,
+          OMX_TMUX_HUD_OWNER: '1',
+          OMX_TMUX_HUD_LEADER_PANE: '%leader',
+        },
+        'gemini',
+      );
+      assert.equal(cmd, `exec /bin/sh '${stateRoot}/team/alpha/runtime/worker-1-startup.sh'`);
+      const script = await readFile(join(stateRoot, 'team', 'alpha', 'runtime', 'worker-1-startup.sh'), 'utf-8');
+      assert.match(script, /^#!\/bin\/sh/m);
+      assert.match(script, new RegExp(`cd '${wd.replace(/'/g, `'\\\\''`)}'`));
+      assert.match(script, /^unset OMX_TMUX_HUD_OWNER OMX_TMUX_HUD_LEADER_PANE$/m);
+      assert.match(script, /export OMX_TEAM_STATE_ROOT=/);
+      assert.doesNotMatch(script, /^export OMX_TMUX_HUD_OWNER=/m);
+      assert.doesNotMatch(script, /^export OMX_TMUX_HUD_LEADER_PANE=/m);
+      assert.match(script, /exec '\/bin\/bash' -c /);
+      assert.doesNotMatch(cmd ?? '', /OMX_TEAM_STATE_ROOT=/, 'tmux command should point at script instead of inlining env');
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+      if (typeof prevHudOwner === 'string') process.env.OMX_TMUX_HUD_OWNER = prevHudOwner;
+      else delete process.env.OMX_TMUX_HUD_OWNER;
+      if (typeof prevHudLeaderPane === 'string') process.env.OMX_TMUX_HUD_LEADER_PANE = prevHudLeaderPane;
+      else delete process.env.OMX_TMUX_HUD_LEADER_PANE;
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('trusts worktree .mise.toml before worker launch when mise is available', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-worker-mise-trust-'));
+    const fakeBin = join(wd, 'bin');
+    const logPath = join(wd, 'mise.log');
+    const previousPath = process.env.PATH;
+    try {
+      await mkdir(fakeBin, { recursive: true });
+      await writeFile(join(wd, '.mise.toml'), '[tools]\nnode = "latest"\n');
+      await writeFile(
+        join(fakeBin, 'mise'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${logPath}'\nexit 0\n`,
+      );
+      await chmod(join(fakeBin, 'mise'), 0o755);
+      process.env.PATH = `${fakeBin}:${previousPath ?? ''}`;
+      assert.equal(trustWorkerMiseConfigIfAvailable(wd), true);
+      assert.match(await readFile(logPath, 'utf-8'), new RegExp(`trust --yes ${wd.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\/\\.mise\\.toml`));
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('fails soft when .mise.toml exists but mise is unavailable', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-worker-mise-missing-'));
+    try {
+      await writeFile(join(wd, '.mise.toml'), '[tools]\nnode = "latest"\n');
+      withEmptyPath(() => {
+        assert.equal(trustWorkerMiseConfigIfAvailable(wd), false);
+      });
+    } finally {
+      await rm(wd, { recursive: true, force: true });
     }
   });
 
@@ -2151,6 +2342,34 @@ describe('team worker launch mode helpers', () => {
       assert.deepEqual(spec.args, ['--model', 'gpt-5.3-codex', '--dangerously-bypass-approvals-and-sandbox']);
       assert.equal(spec.env.OMX_TEAM_WORKER, 'alpha-team/worker-2');
       assert.equal(spec.env.OMX_TEAM_STATE_ROOT, '/tmp/workspace/.omx/state');
+      assert.equal(spec.env.OMX_TMUX_HUD_OWNER, undefined);
+      assert.equal(spec.env.OMX_TMUX_HUD_LEADER_PANE, undefined);
+    } finally {
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('buildWorkerProcessLaunchSpec scrubs HUD ownership env from worker launches', () => {
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const spec = buildWorkerProcessLaunchSpec(
+        'alpha-team',
+        1,
+        [],
+        '/tmp/workspace',
+        {
+          OMX_TEAM_STATE_ROOT: '/tmp/workspace/.omx/state',
+          OMX_TMUX_HUD_OWNER: '1',
+          OMX_TMUX_HUD_LEADER_PANE: '%leader',
+        },
+        'codex',
+      );
+      assert.equal(spec.env.OMX_TEAM_WORKER, 'alpha-team/worker-1');
+      assert.equal(spec.env.OMX_TEAM_STATE_ROOT, '/tmp/workspace/.omx/state');
+      assert.equal(spec.env.OMX_TMUX_HUD_OWNER, undefined);
+      assert.equal(spec.env.OMX_TMUX_HUD_LEADER_PANE, undefined);
     } finally {
       if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
       else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
@@ -3126,6 +3345,97 @@ esac
 });
 
 describe('createTeamSession tmux instance tagging', () => {
+  it('redraws the leader pane after team layout changes so wrapped diff hunks repaint with gutters', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-redraw-leader-'));
+    const prevTmux = process.env.TMUX;
+    const prevTmuxPane = process.env.TMUX_PANE;
+    const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-redraw-leader-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*)
+        echo "120"
+        ;;
+      *)
+        echo "leader:0 %1"
+        ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"pane_current_command"*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        ;;
+      *)
+        printf "%%1\\n"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *" -h "*)
+        echo "%2"
+        ;;
+      *)
+        echo "%3"
+        ;;
+    esac
+    exit 0
+    ;;
+  set-option|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|send-keys)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+        `,
+        async ({ logPath }) => {
+          const fakeBinDir = join(logPath, '..');
+          const geminiPath = join(fakeBinDir, 'gemini');
+          await writeFile(geminiPath, '#!/bin/sh\nexit 0\n');
+          await chmod(geminiPath, 0o755);
+
+          process.env.TMUX = 'leader-session,stub,0';
+          process.env.TMUX_PANE = '%1';
+          process.env.OMX_TEAM_WORKER_CLI = 'gemini';
+
+          createTeamSession('Diff Gutter Redraw', 1, cwd);
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /select-layout -t leader:0 main-vertical/);
+          assert.match(tmuxLog, /set-window-option -t leader:0 main-pane-width 60/);
+          assert.match(tmuxLog, /split-window -v -f -l 3 -t leader:0 -d -P -F #\{pane_id\}/);
+          assert.match(
+            tmuxLog,
+            /send-keys -t %1 C-l/,
+            'leader Codex pane must repaint after team splits/resizes so tmux does not auto-wrap diff continuation rows without the line-number gutter',
+          );
+        },
+      );
+    } finally {
+      if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
+      else delete process.env.TMUX;
+      if (typeof prevTmuxPane === 'string') process.env.TMUX_PANE = prevTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof prevWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('tags leader, worker, and HUD panes with pane-scoped instance ownership', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-pane-tags-'));
     const prevTmux = process.env.TMUX;
@@ -3206,7 +3516,10 @@ esac
           assert.match(tmuxLog, /set-option -p -t %1 @omx_pane_instance_id omx-pane-scope/);
           assert.match(tmuxLog, /set-option -p -t %2 @omx_pane_instance_id omx-pane-scope/);
           assert.match(tmuxLog, /set-option -p -t %3 @omx_pane_instance_id omx-pane-scope/);
-          assert.match(tmuxLog, /exec env OMX_TMUX_HUD_OWNER=1 .*hud --watch/);
+          assert.match(tmuxLog, /set-option -p -t %1 @omx_team_pane_owner_id team:pane-tags/);
+          assert.match(tmuxLog, /set-option -p -t %2 @omx_team_pane_owner_id team:pane-tags/);
+          assert.match(tmuxLog, /set-option -p -t %3 @omx_team_pane_owner_id team:pane-tags/);
+          assert.match(tmuxLog, /exec env OMX_SESSION_ID='omx-pane-scope' OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%1' .*hud --watch/);
         },
       );
     } finally {
@@ -3222,7 +3535,201 @@ esac
     }
   });
 
-  it('continues startup with best-effort resize fallback when indexed window-resized hook registration fails', async () => {
+  it('does not reuse the Team pane owner token as the HUD logical session id', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-hud-session-boundary-'));
+    const prevTmux = process.env.TMUX;
+    const prevTmuxPane = process.env.TMUX_PANE;
+    const prevSessionId = process.env.OMX_SESSION_ID;
+    const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-hud-session-boundary-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*)
+        echo "120"
+        ;;
+      *)
+        echo "shared:0 %1"
+        ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"-t %2 -F #{pane_pid}"*)
+        echo "2000002222"
+        ;;
+      *"pane_current_command"*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        ;;
+      *)
+        printf "%%1\\n"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *" -h "*)
+        echo "%2"
+        ;;
+      *)
+        echo "%3"
+        ;;
+    esac
+    exit 0
+    ;;
+  set-option|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+        `,
+        async ({ logPath }) => {
+          const fakeBinDir = join(logPath, '..');
+          const geminiPath = join(fakeBinDir, 'gemini');
+          await writeFile(geminiPath, '#!/bin/sh\nexit 0\n');
+          await chmod(geminiPath, 0o755);
+
+          process.env.TMUX = '1';
+          process.env.TMUX_PANE = '%1';
+          delete process.env.OMX_SESSION_ID;
+          process.env.OMX_TEAM_WORKER_CLI = 'gemini';
+
+          const session = createTeamSession('HUD Session Boundary', 1, cwd, [], undefined, {
+            teamPaneOwnerId: 'team:explicit-owner-boundary',
+          });
+          assert.equal(session.hudPaneId, '%3');
+          assert.equal(session.teamPaneOwnerId, 'team:explicit-owner-boundary');
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /set-option -p -t %1 @omx_team_pane_owner_id team:explicit-owner-boundary/);
+          assert.match(tmuxLog, /set-option -p -t %2 @omx_team_pane_owner_id team:explicit-owner-boundary/);
+          assert.match(tmuxLog, /set-option -p -t %3 @omx_team_pane_owner_id team:explicit-owner-boundary/);
+          assert.match(tmuxLog, /exec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%1' .*hud --watch/);
+          assert.doesNotMatch(tmuxLog, /OMX_SESSION_ID='team:explicit-owner-boundary'/);
+        },
+      );
+    } finally {
+      if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
+      else delete process.env.TMUX;
+      if (typeof prevTmuxPane === 'string') process.env.TMUX_PANE = prevTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof prevSessionId === 'string') process.env.OMX_SESSION_ID = prevSessionId;
+      else delete process.env.OMX_SESSION_ID;
+      if (typeof prevWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('removes only HUD panes owned by the current leader during team startup', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-owned-hud-startup-'));
+    const prevTmux = process.env.TMUX;
+    const prevTmuxPane = process.env.TMUX_PANE;
+    const prevSessionId = process.env.OMX_SESSION_ID;
+    const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-owned-hud-startup-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*)
+        echo "120"
+        ;;
+      *)
+        echo "shared:0 %1"
+        ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"pane_current_command"*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        printf "%%7\\tnode\\t'codex neighbor'\\n"
+        printf "%%2\\tnode\\texec env OMX_SESSION_ID='leader-session-a' OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%%1' node /tmp/bin/omx.js hud --watch\\n"
+        printf "%%8\\tnode\\texec env OMX_SESSION_ID='neighbor-session' OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%%7' node /tmp/bin/omx.js hud --watch\\n"
+        ;;
+      *)
+        printf "%%1\\n%%7\\n%%2\\n%%8\\n"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *" -h "*)
+        echo "%3"
+        ;;
+      *)
+        echo "%4"
+        ;;
+    esac
+    exit 0
+    ;;
+  set-option|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|send-keys|kill-pane)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+        `,
+        async ({ logPath }) => {
+          const fakeBinDir = join(logPath, '..');
+          const geminiPath = join(fakeBinDir, 'gemini');
+          await writeFile(geminiPath, '#!/bin/sh\nexit 0\n');
+          await chmod(geminiPath, 0o755);
+
+          process.env.TMUX = 'shared-session,stub,0';
+          process.env.TMUX_PANE = '%1';
+          process.env.OMX_SESSION_ID = 'leader-session-a';
+          process.env.OMX_TEAM_WORKER_CLI = 'gemini';
+
+          const session = createTeamSession('Owned HUD Startup', 1, cwd);
+          assert.equal(session.leaderPaneId, '%1');
+          assert.equal(session.hudPaneId, '%4');
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /kill-pane -t %2/);
+          assert.doesNotMatch(tmuxLog, /kill-pane -t %8/);
+          assert.match(tmuxLog, /split-window -v -f -l 3 -t shared:0 -d -P -F #\{pane_id\}/);
+        },
+      );
+    } finally {
+      if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
+      else delete process.env.TMUX;
+      if (typeof prevTmuxPane === 'string') process.env.TMUX_PANE = prevTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof prevSessionId === 'string') process.env.OMX_SESSION_ID = prevSessionId;
+      else delete process.env.OMX_SESSION_ID;
+      if (typeof prevWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('uses tmux 3.2a-compatible client-resized hook registration for team HUD resize', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-resize-hook-fallback-'));
     const prevTmux = process.env.TMUX;
     const prevTmuxPane = process.env.TMUX_PANE;
@@ -3280,6 +3787,10 @@ case "\${1:-}" in
         echo "invalid option: window-resized[]" >&2
         exit 1
         ;;
+      *" -w "*)
+        echo "invalid option: -w" >&2
+        exit 1
+        ;;
       *)
         exit 0
         ;;
@@ -3306,16 +3817,101 @@ esac
 
           const session = createTeamSession('Resize Hook Fallback', 1, cwd);
           assert.equal(session.hudPaneId, '%3');
-          assert.equal(session.resizeHookName, null);
-          assert.equal(session.resizeHookTarget, null);
-          assert.match(warnings.join('\n'), /tmux resize hook unavailable/);
-          assert.match(warnings.join('\n'), /invalid option: window-resized\[\]/);
+          assert.ok(session.resizeHookName);
+          assert.equal(session.resizeHookTarget, 'leader:0');
+          assert.equal(warnings.join('\n'), '');
 
           const tmuxLog = await readFile(logPath, 'utf-8');
-          assert.match(tmuxLog, /set-hook -w -t leader:0 window-resized\[\d+\]/);
+          assert.match(tmuxLog, /set-hook -t leader:0 client-resized\[\d+\]/);
+          assert.doesNotMatch(tmuxLog, /window-resized\[/);
+          assert.doesNotMatch(tmuxLog, /set-hook -w /);
           assert.match(tmuxLog, /set-hook -t leader:0 client-attached\[\d+\]/);
           assert.match(tmuxLog, new RegExp(`run-shell -b sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}; .*resize-pane -t %3 -y ${HUD_TMUX_TEAM_HEIGHT_LINES}`));
           assert.match(tmuxLog, new RegExp(`run-shell .*resize-pane -t %3 -y ${HUD_TMUX_TEAM_HEIGHT_LINES}`));
+          assert.doesNotMatch(tmuxLog, /kill-pane -t %2/);
+          assert.doesNotMatch(tmuxLog, /kill-pane -t %3/);
+        },
+      );
+    } finally {
+      console.warn = prevWarn;
+      if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
+      else delete process.env.TMUX;
+      if (typeof prevTmuxPane === 'string') process.env.TMUX_PANE = prevTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof prevWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades HUD run-shell resize failures to warnings during team startup', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-runshell-fallback-'));
+    const prevTmux = process.env.TMUX;
+    const prevTmuxPane = process.env.TMUX_PANE;
+    const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    const prevWarn = console.warn;
+    const warnings: string[] = [];
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-runshell-fallback-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*) echo "120" ;;
+      *) echo "leader:0 %1" ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"pane_current_command"*) printf "%%1\\tnode\\t'codex'\\n" ;;
+      *) printf "%%1\\n" ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *" -h "*) echo "%2" ;;
+      *) echo "%3" ;;
+    esac
+    exit 0
+    ;;
+  run-shell)
+    echo "Unsupported tmux compatibility command: run-shell" >&2
+    exit 1
+    ;;
+  set-option|resize-pane|select-layout|set-window-option|select-pane|set-hook|send-keys)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        async ({ logPath }) => {
+          const fakeBinDir = join(logPath, '..');
+          const geminiPath = join(fakeBinDir, 'gemini');
+          await writeFile(geminiPath, '#!/bin/sh\nexit 0\n');
+          await chmod(geminiPath, 0o755);
+
+          process.env.TMUX = 'leader-session,stub,0';
+          process.env.TMUX_PANE = '%1';
+          process.env.OMX_TEAM_WORKER_CLI = 'gemini';
+          console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+
+          const session = createTeamSession('Run Shell Fallback', 1, cwd);
+          assert.equal(session.hudPaneId, '%3');
+          assert.match(warnings.join('\n'), /HUD resize/);
+          assert.match(warnings.join('\n'), /Unsupported tmux compatibility command: run-shell/);
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /run-shell -b sleep/);
           assert.doesNotMatch(tmuxLog, /kill-pane -t %2/);
           assert.doesNotMatch(tmuxLog, /kill-pane -t %3/);
         },
@@ -3418,7 +4014,7 @@ esac
           assert.equal(session.hudPaneId, '%3');
 
           const tmuxLog = await readFile(logPath, 'utf-8');
-          assert.match(tmuxLog, /display-message -p #S:#I #{pane_id}/);
+          assert.match(tmuxLog, /display-message -p #\{session_name\}:#\{window_index\} #\{pane_id\}/);
           assert.match(tmuxLog, /powershell\.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand/);
           assert.doesNotMatch(tmuxLog, /\/bin\/sh -lc/);
           assert.match(tmuxLog, new RegExp(`resize-pane -t %3 -y ${HUD_TMUX_TEAM_HEIGHT_LINES}`));
@@ -3532,7 +4128,8 @@ esac
 
           const tmuxLog = await readFile(logPath, 'utf-8');
           assert.match(tmuxLog, new RegExp(`resize-pane -t %3 -y ${HUD_TMUX_TEAM_HEIGHT_LINES}`));
-          assert.doesNotMatch(tmuxLog, /set-hook -w -t leader:0 window-resized\[\d+\]/);
+          assert.doesNotMatch(tmuxLog, /set-hook -w /);
+          assert.doesNotMatch(tmuxLog, /window-resized\[/);
           assert.doesNotMatch(tmuxLog, /set-hook -t leader:0 client-attached\[\d+\]/);
           assert.doesNotMatch(tmuxLog, /run-shell -b sleep \d+; tmux resize-pane -t %3 -y \d+ >/);
           assert.doesNotMatch(tmuxLog, /run-shell tmux resize-pane -t %3 -y \d+ >/);
@@ -3736,6 +4333,370 @@ esac
     }
   });
 
+  it('reuses an existing standalone HUD pane across repeated restore calls', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-standalone-reuse-hud-'));
+
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-reuse-standalone-hud-',
+        (logPath) => {
+          const statePath = `${logPath}.state`;
+          return `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  list-panes)
+    printf '%%11\\tzsh\\tzsh\\n'
+    if [ -f "${statePath}" ]; then
+      printf "%%44\\tnode\\texec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%%11' /node /omx.js hud --watch\\n"
+    fi
+    exit 0
+    ;;
+  split-window)
+    : > "${statePath}"
+    echo "%44"
+    exit 0
+    ;;
+  run-shell|select-pane|resize-pane|set-hook|kill-pane)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`;
+        },
+        async ({ logPath }) => {
+          const firstPaneId = restoreStandaloneHudPane('%11', cwd);
+          const secondPaneId = restoreStandaloneHudPane('%11', cwd);
+
+          assert.equal(firstPaneId, '%44');
+          assert.equal(secondPaneId, '%44');
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          const splitCount = (tmuxLog.match(/(^|\n)split-window /g) ?? []).length;
+          assert.equal(splitCount, 1);
+          assert.doesNotMatch(tmuxLog, /kill-pane -t %44/);
+          assert.match(tmuxLog, /list-panes -t %11 -F #\{pane_id\}\t#\{pane_current_command\}\t#\{pane_start_command\}/);
+        },
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('restores standalone HUD panes from the live leader pane cwd with explicit session ownership', async () => {
+    const teamLaunchCwd = await mkdtemp(join(tmpdir(), 'omx-standalone-team-launch-cwd-'));
+    const leaderPaneCwd = await mkdtemp(join(tmpdir(), 'omx-standalone-leader-pane-cwd-'));
+
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-leader-cwd-standalone-hud-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_current_path}"*)
+        echo "${leaderPaneCwd}"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    echo "%44"
+    exit 0
+    ;;
+  run-shell|select-pane|resize-pane|set-hook)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        async ({ logPath }) => {
+          const paneId = restoreStandaloneHudPane('%11', teamLaunchCwd, {
+            sessionId: 'current-session-for-hud',
+          });
+          assert.equal(paneId, '%44');
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /display-message -p -t %11 #\{pane_current_path\}/);
+          assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %11 -d -P -F #\\{pane_id\\} -c ${escapeRegExp(leaderPaneCwd)} `));
+          assert.doesNotMatch(tmuxLog, new RegExp(`split-window .* -c ${escapeRegExp(teamLaunchCwd)} `));
+          assert.match(
+            tmuxLog,
+            /exec env OMX_SESSION_ID='current-session-for-hud' OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%11' .*hud --watch/,
+          );
+        },
+      );
+    } finally {
+      await rm(teamLaunchCwd, { recursive: true, force: true });
+      await rm(leaderPaneCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the team launch cwd when the live leader pane cwd is unusable', async () => {
+    const teamLaunchCwd = await mkdtemp(join(tmpdir(), 'omx-standalone-team-launch-cwd-fallback-'));
+    const deletedLeaderPaneCwd = await mkdtemp(join(tmpdir(), 'omx-standalone-deleted-leader-pane-cwd-'));
+    await rm(deletedLeaderPaneCwd, { recursive: true, force: true });
+
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-deleted-leader-cwd-standalone-hud-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_current_path}"*)
+        echo "${deletedLeaderPaneCwd}"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *"-c ${teamLaunchCwd} "*)
+        echo "%44"
+        exit 0
+        ;;
+      *"-c ${deletedLeaderPaneCwd} "*)
+        echo "deleted cwd should not be used" >&2
+        exit 1
+        ;;
+      *)
+        echo "unexpected cwd: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  run-shell|select-pane|resize-pane|set-hook)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        async ({ logPath }) => {
+          const paneId = restoreStandaloneHudPane('%11', teamLaunchCwd, {
+            sessionId: 'current-session-for-hud',
+          });
+          assert.equal(paneId, '%44');
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /display-message -p -t %11 #\{pane_current_path\}/);
+          assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %11 -d -P -F #\\{pane_id\\} -c ${escapeRegExp(teamLaunchCwd)} `));
+          assert.doesNotMatch(tmuxLog, new RegExp(`split-window .* -c ${escapeRegExp(deletedLeaderPaneCwd)} `));
+          assert.match(tmuxLog, /select-pane -t %11/);
+        },
+      );
+    } finally {
+      await rm(teamLaunchCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps MSYS drive-style live leader cwd candidates without raw stat prefiltering', async () => {
+    const liveLeaderCwd = '/c/live';
+    const fallbackCwd = 'C:\\fallback';
+    const fakeCygpathDir = await mkdtemp(join(tmpdir(), 'omx-msys-live-cygpath-'));
+    const previousPath = process.env.PATH;
+    const previousMsystem = process.env.MSYSTEM;
+    const previousOstype = process.env.OSTYPE;
+    const previousWsl = process.env.WSL_DISTRO_NAME;
+    const previousWslInterop = process.env.WSL_INTEROP;
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const statCalls: string[] = [];
+
+    try {
+      const cygpathPath = join(fakeCygpathDir, 'cygpath');
+      await writeFile(cygpathPath, '#!/bin/sh\nprintf "%s\\n" "$2"\n');
+      await chmod(cygpathPath, 0o755);
+      process.env.PATH = `${fakeCygpathDir}:${previousPath ?? ''}`;
+      process.env.MSYSTEM = 'MINGW64';
+      process.env.OSTYPE = 'msys';
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+      await withMockTmuxFixture(
+        'omx-tmux-msys-live-cwd-standalone-hud-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_current_path}"*)
+        echo "${liveLeaderCwd}"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *"-c ${liveLeaderCwd} "*)
+        echo "%44"
+        exit 0
+        ;;
+      *"-c ${fallbackCwd} "*)
+        echo "fallback cwd should not be used when MSYS live cwd succeeds" >&2
+        exit 1
+        ;;
+      *)
+        echo "unexpected cwd: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  run-shell|select-pane|resize-pane|set-hook)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        async ({ logPath }) => {
+          const paneId = withMockedStatSync(
+            ((pathLike: fs.PathLike) => {
+              const value = String(pathLike);
+              statCalls.push(value);
+              if (value === fallbackCwd) return { isDirectory: () => true } as fs.Stats;
+              return { isDirectory: () => false } as fs.Stats;
+            }) as typeof fs.statSync,
+            () => restoreStandaloneHudPane('%11', fallbackCwd, { sessionId: 'current-session-for-hud' }),
+          );
+          assert.equal(paneId, '%44');
+          assert.equal(statCalls.includes(liveLeaderCwd), false);
+          assert.equal(statCalls.includes(fallbackCwd), true);
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /display-message -p -t %11 #\{pane_current_path\}/);
+          assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %11 -d -P -F #\\{pane_id\\} -c ${escapeRegExp(liveLeaderCwd)} `));
+          assert.doesNotMatch(tmuxLog, new RegExp(`split-window .* -c ${escapeRegExp(fallbackCwd)} `));
+          assert.match(tmuxLog, /select-pane -t %11/);
+        },
+      );
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      if (typeof previousMsystem === 'string') process.env.MSYSTEM = previousMsystem;
+      else delete process.env.MSYSTEM;
+      if (typeof previousOstype === 'string') process.env.OSTYPE = previousOstype;
+      else delete process.env.OSTYPE;
+      if (typeof previousWsl === 'string') process.env.WSL_DISTRO_NAME = previousWsl;
+      else delete process.env.WSL_DISTRO_NAME;
+      if (typeof previousWslInterop === 'string') process.env.WSL_INTEROP = previousWslInterop;
+      else delete process.env.WSL_INTEROP;
+      await rm(fakeCygpathDir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back after an unusable MSYS drive-style live leader cwd split attempt fails', async () => {
+    const liveLeaderCwd = '/c/deleted-live';
+    const fallbackCwd = 'C:\\fallback';
+    const fakeCygpathDir = await mkdtemp(join(tmpdir(), 'omx-msys-deleted-live-cygpath-'));
+    const previousPath = process.env.PATH;
+    const previousMsystem = process.env.MSYSTEM;
+    const previousOstype = process.env.OSTYPE;
+    const previousWsl = process.env.WSL_DISTRO_NAME;
+    const previousWslInterop = process.env.WSL_INTEROP;
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const statCalls: string[] = [];
+
+    try {
+      const cygpathPath = join(fakeCygpathDir, 'cygpath');
+      await writeFile(cygpathPath, '#!/bin/sh\nprintf "%s\\n" "$2"\n');
+      await chmod(cygpathPath, 0o755);
+      process.env.PATH = `${fakeCygpathDir}:${previousPath ?? ''}`;
+      process.env.MSYSTEM = 'MINGW64';
+      process.env.OSTYPE = 'msys';
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+      await withMockTmuxFixture(
+        'omx-tmux-msys-deleted-live-cwd-standalone-hud-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_current_path}"*)
+        echo "${liveLeaderCwd}"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *"-c ${liveLeaderCwd} "*)
+        echo "deleted live cwd cannot be used" >&2
+        exit 1
+        ;;
+      *"-c ${fallbackCwd} "*)
+        echo "%44"
+        exit 0
+        ;;
+      *)
+        echo "unexpected cwd: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  run-shell|select-pane|resize-pane|set-hook)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        async ({ logPath }) => {
+          const paneId = withMockedStatSync(
+            ((pathLike: fs.PathLike) => {
+              const value = String(pathLike);
+              statCalls.push(value);
+              if (value === fallbackCwd) return { isDirectory: () => true } as fs.Stats;
+              return { isDirectory: () => false } as fs.Stats;
+            }) as typeof fs.statSync,
+            () => restoreStandaloneHudPane('%11', fallbackCwd, { sessionId: 'current-session-for-hud' }),
+          );
+          assert.equal(paneId, '%44');
+          assert.equal(statCalls.includes(liveLeaderCwd), false);
+          assert.equal(statCalls.includes(fallbackCwd), true);
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          const liveAttemptIndex = tmuxLog.indexOf(`-c ${liveLeaderCwd} `);
+          const fallbackAttemptIndex = tmuxLog.indexOf(`-c ${fallbackCwd} `);
+          assert.ok(liveAttemptIndex >= 0, 'deleted MSYS live cwd should still be attempted');
+          assert.ok(fallbackAttemptIndex > liveAttemptIndex, 'fallback should be attempted after live split failure');
+          assert.match(tmuxLog, /select-pane -t %11/);
+        },
+      );
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      if (typeof previousMsystem === 'string') process.env.MSYSTEM = previousMsystem;
+      else delete process.env.MSYSTEM;
+      if (typeof previousOstype === 'string') process.env.OSTYPE = previousOstype;
+      else delete process.env.OSTYPE;
+      if (typeof previousWsl === 'string') process.env.WSL_DISTRO_NAME = previousWsl;
+      else delete process.env.WSL_DISTRO_NAME;
+      if (typeof previousWslInterop === 'string') process.env.WSL_INTEROP = previousWslInterop;
+      else delete process.env.WSL_INTEROP;
+      await rm(fakeCygpathDir, { recursive: true, force: true });
+    }
+  });
+
   it('restores standalone HUD panes with an absolute OMX entry path after cwd drift', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-standalone-relative-hud-'));
     const startupCwd = await mkdtemp(join(tmpdir(), 'omx-standalone-relative-start-'));
@@ -3778,7 +4739,7 @@ esac
           const tmuxLog = await readFile(logPath, 'utf-8');
           assert.match(tmuxLog, new RegExp(escapeRegExp(launcherPath)));
           assert.doesNotMatch(tmuxLog, /'dist\/cli\/omx\.js' hud --watch/);
-          assert.match(tmuxLog, /exec env OMX_TMUX_HUD_OWNER=1 .*hud --watch/);
+          assert.match(tmuxLog, /exec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%11' .*hud --watch/);
         },
       );
     } finally {
@@ -3829,6 +4790,49 @@ esac
       );
     } finally {
       process.argv = previousArgv;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('restores standalone HUD panes with OMX_ROOT forwarded and shell-escaped', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-standalone-root-hud-'));
+    const previousOmxRoot = process.env.OMX_ROOT;
+
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-root-standalone-hud-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  split-window)
+    echo "%44"
+    exit 0
+    ;;
+  run-shell|select-pane|resize-pane|set-hook)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        async ({ logPath }) => {
+          process.env.OMX_ROOT = "/tmp/boxed root/it's/$(literal)";
+
+          const paneId = restoreStandaloneHudPane('%11', cwd);
+          assert.equal(paneId, '%44');
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(
+            tmuxLog,
+            /exec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%11' OMX_ROOT='\/tmp\/boxed root\/it'\\''s\/\$\(literal\)' .*hud --watch/,
+          );
+        },
+      );
+    } finally {
+      if (typeof previousOmxRoot === 'string') process.env.OMX_ROOT = previousOmxRoot;
+      else delete process.env.OMX_ROOT;
       await rm(cwd, { recursive: true, force: true });
     }
   });
@@ -3912,6 +4916,37 @@ describe('isWorkerAlive', () => {
     withEmptyPath(() => {
       assert.equal(isWorkerAlive('omx-team-x', 1), false);
     });
+  });
+
+  it('treats an existing non-dead pane id as live even when pane_pid is unavailable', async () => {
+    await withMockTmuxFixture(
+      'omx-pane-id-liveness-',
+      (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  list-panes)
+    if [ "$2" = "-a" ]; then
+      printf "%%77 0 \\n%%88 1 \\n"
+      exit 0
+    fi
+    exit 1
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`,
+      async () => {
+        assert.equal(isWorkerAlive('ignored-session', 1, '%77'), true);
+        assert.equal(isWorkerPaneOpen('ignored-session', 1, '%77'), true);
+        assert.equal(isWorkerAlive('ignored-session', 2, '%88'), false);
+      },
+    );
   });
 });
 

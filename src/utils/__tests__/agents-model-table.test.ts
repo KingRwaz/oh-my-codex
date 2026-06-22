@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   buildAgentsModelTable,
   OMX_MODELS_END_MARKER,
@@ -68,7 +71,7 @@ describe('agents model table', () => {
     });
   });
 
-  it('builds table rows for summary roles and posture/modelClass-driven agent recommendations', () => {
+  it('builds table rows for summary roles, exact pins, and posture/modelClass-driven recommendations', () => {
     const table = buildAgentsModelTable({
       frontierModel: 'gpt-frontier',
       sparkModel: 'gpt-spark',
@@ -79,12 +82,41 @@ describe('agents model table', () => {
     assert.match(table, /\| Spark \(explorer\/fast\) \| `gpt-spark` \| low \|/);
     assert.match(table, /\| Standard \(subagent default\) \| `gpt-standard` \| high \|/);
     assert.match(table, /\| `explore` \| `gpt-spark` \| low \| Fast codebase search and file\/symbol mapping \(fast-lane, fast\) \|/);
-    assert.match(table, /\| `architect` \| `gpt-frontier` \| high \| System design, boundaries, interfaces, long-horizon tradeoffs \(frontier-orchestrator, frontier\) \|/);
+    assert.match(table, /\| `planner` \| `gpt-5\.4-mini` \| high \| Task sequencing, execution plans, risk flags \(frontier-orchestrator, frontier\) \|/);
+    assert.match(table, /\| `architect` \| `gpt-5\.4-mini` \| high \| System design, boundaries, interfaces, long-horizon tradeoffs \(frontier-orchestrator, frontier\) \|/);
     assert.doesNotMatch(table, /\| `security-reviewer` \|/);
     assert.doesNotMatch(table, /\| `build-fixer` \|/);
     assert.match(table, /\| `code-reviewer` \| `gpt-frontier` \| high \| Comprehensive review across all concerns \(frontier-orchestrator, frontier\) \|/);
+    assert.match(table, /\| `critic` \| `gpt-frontier` \| high \| Plan\/design critical challenge and review \(frontier-orchestrator, frontier\) \|/);
     assert.match(table, /\| `writer` \| `gpt-standard` \| high \| Documentation, migration notes, user guidance \(fast-lane, standard\) \|/);
     assert.match(table, /\| `executor` \| `gpt-frontier` \| medium \| Code implementation, refactoring, feature work \(deep-worker, standard\) \|/);
+  });
+
+  it('reflects per-agent model and reasoning overrides', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'omx-agents-model-table-'));
+    try {
+      await writeFile(join(codexHome, '.omx-config.json'), JSON.stringify({
+        agentModels: {
+          architect: 'gpt-5.5-architect',
+          explore: 'gpt-5.5-explore',
+        },
+        agentReasoning: {
+          architect: 'xhigh',
+          explore: 'medium',
+        },
+      }));
+
+      const table = buildAgentsModelTable({
+        frontierModel: 'gpt-frontier',
+        sparkModel: 'gpt-spark',
+        subagentDefaultModel: 'gpt-standard',
+      }, undefined, { codexHomeOverride: codexHome });
+
+      assert.match(table, /\| `architect` \| `gpt-5\.5-architect` \| xhigh \|/);
+      assert.match(table, /\| `explore` \| `gpt-5\.5-explore` \| medium \|/);
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
   });
 
   it('replaces existing marker-bounded content and inserts the block after team_model_resolution when missing', () => {

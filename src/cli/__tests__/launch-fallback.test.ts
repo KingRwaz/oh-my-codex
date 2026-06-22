@@ -7,8 +7,29 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HUD_TMUX_HEIGHT_LINES } from '../../hud/constants.js';
+import { DETACHED_TMUX_HISTORY_LIMIT } from '../index.js';
 
-const CLI_SPAWN_TIMEOUT_MS = 15_000;
+const CLI_SPAWN_TIMEOUT_MS = 60_000;
+
+function buildRunOmxEnv(envOverrides: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (
+      key.startsWith('OMX_') ||
+      key.startsWith('CODEX_') ||
+      key === 'TMUX' ||
+      key === 'TMUX_PANE' ||
+      key === 'NODE_OPTIONS' ||
+      key === 'NODE_TEST_CONTEXT'
+    ) {
+      delete env[key];
+    }
+  }
+  return {
+    ...env,
+    ...envOverrides,
+  };
+}
 
 function runOmx(
   cwd: string,
@@ -23,10 +44,7 @@ function runOmx(
     encoding: 'utf-8',
     timeout: CLI_SPAWN_TIMEOUT_MS,
     killSignal: 'SIGKILL',
-    env: {
-      ...process.env,
-      ...envOverrides,
-    },
+    env: buildRunOmxEnv(envOverrides),
   });
   return {
     status: result.status,
@@ -298,12 +316,82 @@ printf 'fake-codex:%s\n' "$*"
   });
 });
 
+describe('Hermes MCP tmux bridge launch', () => {
+  it('creates a detached tmux session without attach-session under OMX_HERMES_MCP_BRIDGE', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-hermes-bridge-'));
+    try {
+      const { env, tmuxLogPath } = await createLaunchFixture(
+        wd,
+        (logPath) => `#!/bin/sh
+printf 'tmux:%s\n' "$*" >> "${logPath}"
+case "$1" in
+  -V|list-sessions)
+    printf 'tmux 3.4\n'
+    exit 0
+    ;;
+  has-session)
+    exit 1
+    ;;
+  new-session)
+    printf '%%12\n'
+    exit 0
+    ;;
+  split-window)
+    printf 'hud-pane\n'
+    exit 0
+    ;;
+  display-message)
+    if [ "$2" = '-p' ] && [ "$3" = '#{socket_path}' ]; then
+      printf '/tmp/tmux-test.sock\n'
+    else
+      printf '0\n'
+    fi
+    exit 0
+    ;;
+  show-options)
+    printf 'off\n'
+    exit 0
+    ;;
+  set-option|set-hook|kill-session|run-shell|resize-pane)
+    exit 0
+    ;;
+  attach-session)
+    printf 'attach must not be called for Hermes MCP bridge\n' >&2
+    exit 99
+    ;;
+esac
+exit 0
+`,
+      );
+
+      const result = runOmx(wd, ['--tmux', 'bridge prompt'], {
+        ...env,
+        OMX_HERMES_MCP_BRIDGE: '1',
+        TMUX: '',
+        TMUX_PANE: '',
+      });
+
+      if (shouldSkipForSpawnPermissions(result.error)) return;
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
+      assert.match(tmuxLog, /tmux:new-session /);
+      assert.match(tmuxLog, /tmux:split-window /);
+      assert.doesNotMatch(tmuxLog, /tmux:attach-session/);
+      assert.doesNotMatch(result.stderr, /failed to attach detached tmux session/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('omx launcher when tmux is available', () => {
-  it('reuses an active madmax detached launch context instead of spawning duplicate tmux sessions', async () => {
+  it('reuses the same boxed madmax detached launch context instead of spawning duplicate tmux sessions', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-launch-madmax-reuse-'));
     try {
       const runs = join(wd, 'runs');
       const activeMarker = join(wd, 'active-session');
+      const instanceMarker = join(wd, 'active-instance');
       const { env, tmuxLogPath } = await createLaunchFixture(
         wd,
         (logPath) => `#!/bin/sh
@@ -318,8 +406,12 @@ case "$1" in
     exit $?
     ;;
   new-session)
-    printf '%s\n' "$*" > "${activeMarker}"
-    printf 'leader-pane\n'
+    prev=''
+    for arg in "$@"; do
+      if [ "$prev" = '-s' ]; then printf '%s\n' "$arg" > "${activeMarker}"; fi
+      prev="$arg"
+    done
+    printf '%%12\n'
     exit 0
     ;;
   split-window)
@@ -329,6 +421,8 @@ case "$1" in
   display-message)
     if [ "$2" = '-p' ] && [ "$3" = '#{socket_path}' ]; then
       printf '/tmp/tmux-test.sock\n'
+    elif [ "$2" = '-p' ] && [ "$5" = '#{session_name}' ]; then
+      cat "${activeMarker}"
     elif [ "$2" = '-p' ] && [ "$5" = '#{session_attached}' ]; then
       printf '1\n'
     else
@@ -337,10 +431,20 @@ case "$1" in
     exit 0
     ;;
   show-options)
+    if [ "$5" = '@omx_instance_id' ]; then
+      cat "${instanceMarker}"
+      exit 0
+    fi
     printf 'off\n'
     exit 0
     ;;
-  set-option|set-hook|attach-session|kill-session|run-shell|resize-pane)
+  set-option)
+    if [ "$4" = '@omx_instance_id' ]; then
+      printf '%s\n' "$5" > "${instanceMarker}"
+    fi
+    exit 0
+    ;;
+  set-hook|attach-session|kill-session|run-shell|resize-pane)
     exit 0
     ;;
 esac
@@ -351,6 +455,8 @@ exit 0
       const baseEnv = {
         ...env,
         OMX_RUNS_DIR: runs,
+        OMXBOX_ACTIVE: '1',
+        OMX_MADMAX_DETACHED_CONTEXT: 'boxed-context-under-test',
         OMX_LAUNCH_POLICY: 'direct',
         TMUX: '',
         TMUX_PANE: '',
@@ -371,14 +477,162 @@ exit 0
       assert.equal((tmuxLog.match(/tmux:new-session/g) || []).length, 1);
       assert.equal((tmuxLog.match(/tmux:has-session/g) || []).length, 1);
       assert.equal((tmuxLog.match(/tmux:attach-session/g) || []).length, 2);
-      const firstRegistryEntry = JSON.parse(
-        (await readFile(join(runs, 'registry.jsonl'), 'utf-8')).trim().split('\n')[0],
-      );
       const activeRecords = await readFile(
-        join(runs, 'active-detached', `${firstRegistryEntry.detached_launch_context}.json`),
+        join(runs, 'active-detached', 'boxed-context-under-test.json'),
         'utf-8',
       );
       assert.match(activeRecords, /"tmux_session_name"/);
+      assert.match(activeRecords, /"session_id"/);
+      assert.match(activeRecords, /"tmux_pane_id": "%12"/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not mutate a stale active-detached tmux session without OMX ownership proof', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-madmax-stale-active-'));
+    try {
+      const runs = join(wd, 'runs');
+      const activeDir = join(runs, 'active-detached');
+      await mkdir(activeDir, { recursive: true });
+      await writeFile(
+        join(activeDir, 'boxed-context-under-test.json'),
+        `${JSON.stringify({
+          version: 1,
+          context_key: 'boxed-context-under-test',
+          created_at: new Date().toISOString(),
+          source_cwd: wd,
+          argv: ['--madmax', '--tmux'],
+          run_dir: wd,
+          tmux_session_name: 'user-owned-session',
+          session_id: 'expected-omx-session-id',
+          tmux_pane_id: '%99',
+        })}\n`,
+      );
+      const { env, tmuxLogPath } = await createLaunchFixture(
+        wd,
+        (logPath) => `#!/bin/sh
+printf 'tmux:%s\n' "$*" >> "${logPath}"
+case "$1" in
+  -V)
+    printf 'tmux 3.4\n'
+    exit 0
+    ;;
+  has-session)
+    exit 0
+    ;;
+  new-session)
+    printf '%%12\n'
+    exit 0
+    ;;
+  split-window)
+    printf 'hud-pane\n'
+    exit 0
+    ;;
+  display-message)
+    if [ "$2" = '-p' ] && [ "$3" = '#{socket_path}' ]; then
+      printf '/tmp/tmux-test.sock\n'
+    elif [ "$2" = '-p' ] && [ "$5" = '#{session_name}' ]; then
+      printf 'user-owned-session\n'
+    else
+      printf '0\n'
+    fi
+    exit 0
+    ;;
+  show-options)
+    if [ "$5" = '@omx_instance_id' ]; then
+      printf 'different-session-id\n'
+      exit 0
+    fi
+    printf 'off\n'
+    exit 0
+    ;;
+  set-option|set-hook|attach-session|kill-session|run-shell|resize-pane)
+    exit 0
+    ;;
+esac
+exit 0
+`,
+      );
+
+      const result = runOmx(wd, ['--madmax', '--tmux'], {
+        ...env,
+        OMX_RUNS_DIR: runs,
+        OMXBOX_ACTIVE: '1',
+        OMX_MADMAX_DETACHED_CONTEXT: 'boxed-context-under-test',
+        OMX_LAUNCH_POLICY: 'direct',
+        TMUX: '',
+        TMUX_PANE: '',
+      });
+
+      if (shouldSkipForSpawnPermissions(result.error)) return;
+      assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.doesNotMatch(tmuxLog, /tmux:set-option .* -t user-owned-session .*history-limit/);
+      assert.doesNotMatch(tmuxLog, /tmux:clear-history .*user-owned-session|tmux:clear-history .*%99/);
+      assert.match(tmuxLog, /tmux:new-session /);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not reuse the same active-detached lock for independent --madmax --high launches', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-madmax-independent-high-'));
+    try {
+      const runs = join(wd, 'runs');
+      const { env, tmuxLogPath } = await createLaunchFixture(
+        wd,
+        (logPath) => `#!/bin/sh
+printf 'tmux:%s\n' "$*" >> "${logPath}"
+case "$1" in
+  -V) printf 'tmux 3.4\n'; exit 0 ;;
+  has-session) exit 1 ;;
+  new-session) printf '%%12\n'; exit 0 ;;
+  split-window) printf 'hud-pane\n'; exit 0 ;;
+  display-message) if [ "$2" = '-p' ] && [ "$3" = '#{socket_path}' ]; then printf '/tmp/tmux-test.sock\n'; else printf '0\n'; fi; exit 0 ;;
+  show-options) printf 'off\n'; exit 0 ;;
+  set-option|set-hook|attach-session|kill-session|run-shell|resize-pane) exit 0 ;;
+esac
+exit 0
+`,
+      );
+      const baseEnv = {
+        ...env,
+        OMX_RUNS_DIR: runs,
+        OMX_LAUNCH_POLICY: 'direct',
+        TMUX: '',
+        TMUX_PANE: '',
+      };
+
+      const first = runOmx(wd, ['--madmax', '--high', '--tmux'], baseEnv);
+      const second = runOmx(wd, ['--madmax', '--high', '--tmux'], baseEnv);
+      if (shouldSkipForSpawnPermissions(first.error) || shouldSkipForSpawnPermissions(second.error)) return;
+      assert.equal(first.status, 0, first.error || first.stderr || first.stdout);
+      assert.equal(second.status, 0, second.error || second.stderr || second.stdout);
+      assert.doesNotMatch(first.stderr + second.stderr, /timed out waiting for madmax detached launch context lock/);
+      assert.doesNotMatch(second.stderr, /madmax detached launch already active for this context/);
+
+      const registryEntries = (await readFile(join(runs, 'registry.jsonl'), 'utf-8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { detached_launch_context: string });
+      assert.equal(registryEntries.length, 2);
+      assert.notEqual(
+        registryEntries[0]!.detached_launch_context,
+        registryEntries[1]!.detached_launch_context,
+        'independent launches must get distinct active-detached lock identities',
+      );
+      assert.equal(
+        existsSync(join(runs, 'active-detached', `${registryEntries[0]!.detached_launch_context}.json`)),
+        true,
+      );
+      assert.equal(
+        existsSync(join(runs, 'active-detached', `${registryEntries[1]!.detached_launch_context}.json`)),
+        true,
+      );
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.equal((tmuxLog.match(/tmux:new-session/g) || []).length, 2);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
@@ -395,7 +649,7 @@ printf 'tmux:%s\n' "$*" >> "${logPath}"
 case "$1" in
   -V) printf 'tmux 3.4\n'; exit 0 ;;
   has-session) exit 1 ;;
-  new-session) printf 'leader-pane\n'; exit 0 ;;
+  new-session) printf '%%12\n'; exit 0 ;;
   split-window) printf 'hud-pane\n'; exit 0 ;;
   display-message) if [ "$2" = '-p' ] && [ "$3" = '#{socket_path}' ]; then printf '/tmp/tmux-test.sock\n'; else printf '0\n'; fi; exit 0 ;;
   show-options) printf 'off\n'; exit 0 ;;
@@ -452,7 +706,7 @@ case "$1" in
     exit 0
     ;;
   new-session)
-    printf 'leader-pane\\n'
+    printf '%%12\n'
     exit 0
     ;;
   split-window)
@@ -498,7 +752,15 @@ exit 0
       if (shouldSkipForSpawnPermissions(result.error)) return;
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.doesNotMatch(tmuxLog, /tmux:show-options -gv history-limit/);
+      assert.doesNotMatch(tmuxLog, /tmux:set-option -g[q ]+history-limit/);
       assert.match(tmuxLog, /tmux:new-session .* -s /);
+      assert.match(tmuxLog, new RegExp(`tmux:set-option -q -t .* history-limit ${DETACHED_TMUX_HISTORY_LIMIT}`));
+      assert.match(tmuxLog, new RegExp(`tmux:set-option -pq -t %12 history-limit ${DETACHED_TMUX_HISTORY_LIMIT}`));
+      assert.match(
+        tmuxLog,
+        /tmux:set-hook -t .* client-detached\[[0-9]+\] if-shell -F '#\{==:#\{session_attached\},0\}' 'run-shell -b "tmux clear-history -t %12 >\/dev\/null 2>&1 \|\| true"'/,
+      );
       assert.match(tmuxLog, new RegExp(`tmux:split-window -v -l ${HUD_TMUX_HEIGHT_LINES} .* -t `));
       assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
     } finally {

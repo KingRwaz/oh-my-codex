@@ -30,7 +30,9 @@ import {
   getOmxFirstPartySetupMcpServers,
 } from "./omx-first-party-mcp.js";
 import {
-  buildManagedCodexHookTrustToml,
+  buildManagedCodexHookTrustState,
+  escapeTomlBasicString,
+  type ManagedCodexHookTrustState,
   type ManagedCodexHookOptions,
 } from "./codex-hooks.js";
 import type { HudPreset } from "../hud/types.js";
@@ -98,15 +100,15 @@ const OMX_SEEDED_BEHAVIORAL_DEFAULTS_END_MARKER =
   "# End oh-my-codex seeded behavioral defaults";
 
 export const OMX_DEVELOPER_INSTRUCTIONS =
-  "You have oh-my-codex installed. AGENTS.md is the orchestration brain and main control surface. Follow AGENTS.md for skill/keyword routing, $name workflow invocation, and role-specialized subagents. Use outcome-first, concise progress updates: state the target result, constraints, validation evidence, and stop condition before adding process detail. Native subagents live in .codex/agents and may handle independent parallel subtasks within one Codex session or team pane. Skills load from .codex/skills, not native-agent TOMLs. Treat installed prompts as narrower execution surfaces under AGENTS.md authority.";
+  "You have oh-my-codex installed. AGENTS.md is the orchestration brain and main control surface. Follow AGENTS.md for skill/keyword routing, $name workflow invocation, and role-specialized subagents; when spawning native subagents, set `agent_type` to an installed role and never omit it for OMX work. Use outcome-first, concise progress updates: state the target result, constraints, validation evidence, and stop condition before adding process detail. Native subagents live in .codex/agents and may handle independent parallel subtasks within one Codex session or team pane. Skills load from .codex/skills, not native-agent TOMLs. Treat installed prompts as narrower execution surfaces under AGENTS.md authority.";
 export const OMX_PLUGIN_DEVELOPER_INSTRUCTIONS =
-  "You have oh-my-codex installed through Codex plugin mode. AGENTS.md is the orchestration brain and main control surface. Follow AGENTS.md for skill/keyword routing and $name workflow invocation. Registered Codex plugin marketplace surfaces supply OMX workflows, prompts, and native-agent roles when the plugin is installed. User-installed skills may still live under ~/.codex/skills. Setup-owned prompt files and native-agent TOML defaults are intentionally omitted unless explicitly installed. Use outcome-first, concise progress updates: state the target result, constraints, validation evidence, and stop condition before adding process detail.";
+  '<omx version="1">You have oh-my-codex installed through Codex plugin mode. AGENTS.md is the orchestration brain and main control surface. Follow AGENTS.md for skill/keyword routing and $name workflow invocation. When spawning native subagents, set `agent_type` to an installed role and never omit it for OMX work. Registered Codex plugin marketplace surfaces supply OMX workflows and plugin-scoped companion resources when the plugin is installed; native agent roles are installed as setup-owned Codex agent TOML files in plugin mode so agent_type routing works. User-installed skills may still live under ~/.codex/skills. Use outcome-first, concise progress updates: state the target result, constraints, validation evidence, and stop condition before adding process detail.</omx>';
 const SHARED_MCP_REGISTRY_MARKER = "oh-my-codex (OMX) Shared MCP Registry Sync";
 const SHARED_MCP_REGISTRY_END_MARKER =
   "# End oh-my-codex shared MCP registry sync";
 const OMX_AGENTS_MAX_THREADS = 6;
 const OMX_AGENTS_MAX_DEPTH = 2;
-const OMX_EXPLORE_ROUTING_DEFAULT = "1";
+const OMX_EXPLORE_ROUTING_DEFAULT = "0";
 const OMX_EXPLORE_CMD_ENV = "USE_OMX_EXPLORE_CMD";
 const DEFAULT_LAUNCHER_MCP_STARTUP_TIMEOUT_SEC = 15;
 const STATUS_LINE_FOCUSED_FIELDS: readonly string[] = [
@@ -809,8 +811,312 @@ function upsertFeatureFlags(
 
 const OMX_HOOK_TRUST_START_MARKER = "# OMX-owned Codex hook trust state";
 const OMX_HOOK_TRUST_END_MARKER = "# End OMX-owned Codex hook trust state";
+const OMX_PROJECT_TRUST_START_MARKER =
+  "# OMX-synced Codex project trust state (from runtime CODEX_HOME)";
+const OMX_PROJECT_TRUST_END_MARKER =
+  "# End OMX-synced Codex project trust state";
 
-export function stripManagedCodexHookTrustState(config: string): string {
+function extractMarkerBlockContent(
+  config: string,
+  startMarker: string,
+  endMarker: string,
+): string | undefined {
+  const lines = config.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() !== startMarker) continue;
+
+    const nextEndIdx = lines.findIndex(
+      (line, index) => index > i && line.trim() === endMarker,
+    );
+    const nextStartIdx = lines.findIndex(
+      (line, index) => index > i && line.trim() === startMarker,
+    );
+    if (nextEndIdx === -1 || (nextStartIdx !== -1 && nextStartIdx < nextEndIdx)) {
+      return undefined;
+    }
+
+    return lines.slice(i + 1, nextEndIdx).join("\n").trim();
+  }
+  return undefined;
+}
+
+function stripMarkerBlock(
+  config: string,
+  startMarker: string,
+  endMarker: string,
+): string {
+  const lines = config.split(/\r?\n/);
+  const kept: string[] = [];
+
+  for (let i = 0; i < lines.length;) {
+    if (lines[i].trim() !== startMarker) {
+      kept.push(lines[i]);
+      i += 1;
+      continue;
+    }
+
+    const nextEndIdx = lines.findIndex(
+      (line, index) => index > i && line.trim() === endMarker,
+    );
+    const nextStartIdx = lines.findIndex(
+      (line, index) => index > i && line.trim() === startMarker,
+    );
+    if (nextEndIdx === -1 || (nextStartIdx !== -1 && nextStartIdx < nextEndIdx)) {
+      kept.push(lines[i]);
+      i += 1;
+      continue;
+    }
+    i = nextEndIdx + 1;
+  }
+
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+function isPlainTomlRecord(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+
+function safeParseToml(content: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = TOML.parse(content);
+    return isPlainTomlRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function collectProjectHookTrustStateKeys(config: string): Set<string> {
+  const keys = new Set<string>();
+  const parsed = safeParseToml(config);
+  const hooksTable = isPlainTomlRecord(parsed) ? parsed.hooks : undefined;
+  const hooksState = isPlainTomlRecord(hooksTable) ? hooksTable.state : undefined;
+  if (!isPlainTomlRecord(hooksState)) return keys;
+  for (const [key, entry] of Object.entries(hooksState)) {
+    if (!isPlainTomlRecord(entry)) continue;
+    keys.add(key);
+  }
+  return keys;
+}
+
+/**
+ * Repairs project configs from the 0.18.3 relaunch regression where a
+ * project-synced trust block could duplicate setup-owned hook trust tables and
+ * make the next runtime CODEX_HOME config.toml invalid before Codex started.
+ */
+export function repairProjectScopeTrustStateForLaunch(
+  projectConfig: string,
+  projectHooksPath: string,
+): string {
+  const syncedTrustBlock = extractMarkerBlockContent(
+    projectConfig,
+    OMX_PROJECT_TRUST_START_MARKER,
+    OMX_PROJECT_TRUST_END_MARKER,
+  );
+  if (!syncedTrustBlock) return projectConfig;
+
+  const stripped = stripMarkerBlock(
+    projectConfig,
+    OMX_PROJECT_TRUST_START_MARKER,
+    OMX_PROJECT_TRUST_END_MARKER,
+  );
+  const repaired = syncProjectScopeTrustStateFromRuntime(
+    stripped,
+    syncedTrustBlock,
+    projectHooksPath,
+  );
+  return repaired === stripped ? projectConfig : repaired;
+}
+
+/**
+ * Project-scope launches mirror the durable project config.toml into an
+ * ephemeral runtime CODEX_HOME. Codex writes its workspace-trust ledger and
+ * hook trust ledger into the runtime config.toml during the session. Without
+ * persistence, those entries die with the runtime, so Codex prompts to trust
+ * the workspace and hooks on every launch (issue #2470).
+ *
+ * This function extracts only trust-state tables (`[projects."<cwd>"]` and
+ * `[hooks.state."<projectHooksPath>:..."]`) from the runtime config.toml and
+ * upserts them into the durable project config.toml inside a marker-fenced
+ * block, preserving any surrounding user-managed content and comments and
+ * ignoring Codex's NUX counters or other ephemeral runtime-only writes.
+ */
+export function syncProjectScopeTrustStateFromRuntime(
+  projectConfig: string,
+  runtimeConfig: string,
+  projectHooksPath: string,
+): string {
+  const parsed = safeParseToml(runtimeConfig);
+  if (!parsed) return projectConfig;
+
+  const stripped = stripMarkerBlock(
+    projectConfig,
+    OMX_PROJECT_TRUST_START_MARKER,
+    OMX_PROJECT_TRUST_END_MARKER,
+  );
+  const existingHookTrustStateKeys = collectProjectHookTrustStateKeys(stripped);
+  const trustBlockLines: string[] = [];
+
+  const projectsTable = parsed.projects;
+  if (isPlainTomlRecord(projectsTable)) {
+    for (const [projectKey, entry] of Object.entries(projectsTable).sort(
+      ([a], [b]) => a.localeCompare(b),
+    )) {
+      if (!isPlainTomlRecord(entry)) continue;
+      const serialized = TOML.stringify({ [projectKey]: entry } as TOML.JsonMap);
+      const renderedHeader = `[projects."${escapeTomlBasicString(projectKey)}"]`;
+      const body = serialized
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*\[/.test(line) && line.trim() !== "")
+        .join("\n");
+      if (body.length === 0) continue;
+      trustBlockLines.push(renderedHeader, body, "");
+    }
+  }
+
+  const hooksTable = parsed.hooks;
+  const hooksState = isPlainTomlRecord(hooksTable) ? hooksTable.state : undefined;
+  if (isPlainTomlRecord(hooksState)) {
+    for (const [stateKey, entry] of Object.entries(hooksState).sort(
+      ([a], [b]) => a.localeCompare(b),
+    )) {
+      if (!isPlainTomlRecord(entry)) continue;
+      if (!stateKey.startsWith(`${projectHooksPath}:`)) continue;
+      if (existingHookTrustStateKeys.has(stateKey)) continue;
+      const trusted = entry.trusted_hash;
+      if (typeof trusted !== "string" || trusted.length === 0) continue;
+      trustBlockLines.push(
+        `[hooks.state."${escapeTomlBasicString(stateKey)}"]`,
+        `trusted_hash = "${escapeTomlBasicString(trusted)}"`,
+        "",
+      );
+    }
+  }
+
+  if (trustBlockLines.length === 0) {
+    return stripped.length === 0 ? "" : `${stripped}\n`;
+  }
+
+  const block = [
+    OMX_PROJECT_TRUST_START_MARKER,
+    ...trustBlockLines,
+    OMX_PROJECT_TRUST_END_MARKER,
+    "",
+  ].join("\n");
+
+  if (stripped.length === 0) return block;
+  return `${stripped}\n\n${block}`;
+}
+
+type ManagedCodexHookTrustStateMap = Record<string, ManagedCodexHookTrustState>;
+
+interface HookTrustStateStripResult {
+  config: string;
+  preservedConflictKeys: Set<string>;
+}
+
+interface HooksStateHeader {
+  key: string;
+  hasInlineComment: boolean;
+}
+
+function decodeTomlBasicString(raw: string): string | undefined {
+  try {
+    const parsed = TOML.parse(`value = "${raw}"`) as { value?: unknown };
+    return typeof parsed.value === "string" ? parsed.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseHooksStateHeader(line: string): HooksStateHeader | undefined {
+  const match = line.match(
+    /^\s*\[hooks\.state\."((?:\\.|[^"\\])*)"\]\s*(#.*)?$/,
+  );
+  if (!match) return undefined;
+  const key = decodeTomlBasicString(match[1] ?? "");
+  if (key === undefined) return undefined;
+  return { key, hasInlineComment: match[2] !== undefined };
+}
+
+function isTomlTableHeader(line: string): boolean {
+  return /^\s*\[\[?[^\]]+\]?\]\s*(?:#.*)?$/.test(line);
+}
+
+function isExactlyManagedHookTrustBody(
+  bodyLines: readonly string[],
+  expectedHash: string,
+): boolean {
+  const nonBlank = bodyLines.filter((line) => line.trim().length > 0);
+  if (nonBlank.length !== 1) return false;
+
+  const expected = expectedHash.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*trusted_hash\\s*=\\s*"${expected}"\\s*$`).test(
+    nonBlank[0] ?? "",
+  );
+}
+
+function stripProofManagedCodexHookTrustStateTables(
+  config: string,
+  managedTrustState: ManagedCodexHookTrustStateMap,
+): HookTrustStateStripResult {
+  if (Object.keys(managedTrustState).length === 0) {
+    return { config, preservedConflictKeys: new Set() };
+  }
+
+  const lines = config.split(/\r?\n/);
+  const kept: string[] = [];
+  const preservedConflictKeys = new Set<string>();
+
+  for (let i = 0; i < lines.length;) {
+    const header = parseHooksStateHeader(lines[i] ?? "");
+    if (!header) {
+      kept.push(lines[i]);
+      i += 1;
+      continue;
+    }
+
+    let tableEnd = lines.length;
+    for (let next = i + 1; next < lines.length; next += 1) {
+      if (isTomlTableHeader(lines[next] ?? "")) {
+        tableEnd = next;
+        break;
+      }
+    }
+
+    const expectedState = managedTrustState[header.key];
+    const removable =
+      expectedState !== undefined &&
+      !header.hasInlineComment &&
+      isExactlyManagedHookTrustBody(
+        lines.slice(i + 1, tableEnd),
+        expectedState.trusted_hash,
+      );
+
+    if (removable) {
+      i = tableEnd;
+      continue;
+    }
+
+    if (expectedState !== undefined) {
+      preservedConflictKeys.add(header.key);
+    }
+
+    kept.push(...lines.slice(i, tableEnd));
+    i = tableEnd;
+  }
+
+  return { config: kept.join("\n"), preservedConflictKeys };
+}
+
+function stripManagedCodexHookTrustStateWithResult(
+  config: string,
+  options: { managedTrustState?: ManagedCodexHookTrustStateMap } = {},
+): HookTrustStateStripResult {
   const lines = config.split(/\r?\n/);
   const kept: string[] = [];
 
@@ -838,46 +1144,50 @@ export function stripManagedCodexHookTrustState(config: string): string {
     i = nextEndIdx + 1;
   }
 
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+  const withoutFenced = kept.join("\n");
+  const proofStripped = options.managedTrustState
+    ? stripProofManagedCodexHookTrustStateTables(
+        withoutFenced,
+        options.managedTrustState,
+      )
+    : { config: withoutFenced, preservedConflictKeys: new Set<string>() };
+
+  return {
+    config: proofStripped.config.replace(/\n{3,}/g, "\n\n").trimEnd(),
+    preservedConflictKeys: proofStripped.preservedConflictKeys,
+  };
 }
 
-function managedCodexHookTrustStateHeaders(
-  hookTrustToml: string,
-): ReadonlySet<string> {
-  const headers = new Set<string>();
-  for (const line of hookTrustToml.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (/^\[hooks\.state\./.test(trimmed)) {
-      headers.add(trimmed);
-    }
-  }
-  return headers;
-}
-
-function stripUnfencedManagedCodexHookTrustState(
+export function stripManagedCodexHookTrustState(
   config: string,
-  hookTrustToml: string,
+  options: { managedTrustState?: ManagedCodexHookTrustStateMap } = {},
 ): string {
-  const managedHeaders = managedCodexHookTrustStateHeaders(hookTrustToml);
-  if (managedHeaders.size === 0) return config;
+  return stripManagedCodexHookTrustStateWithResult(config, options).config;
+}
 
-  const lines = config.split(/\r?\n/);
-  const kept: string[] = [];
+function renderManagedCodexHookTrustToml(
+  managedTrustState: ManagedCodexHookTrustStateMap,
+  excludedKeys: ReadonlySet<string> = new Set(),
+): string {
+  return Object.entries(managedTrustState)
+    .filter(([key]) => !excludedKeys.has(key))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([key, hookState]) => [
+      `[hooks.state."${escapeTomlBasicString(key)}"]`,
+      `trusted_hash = "${escapeTomlBasicString(hookState.trusted_hash)}"`,
+      "",
+    ])
+    .join("\n")
+    .trimEnd();
+}
 
-  for (let i = 0; i < lines.length;) {
-    if (!managedHeaders.has(lines[i].trim())) {
-      kept.push(lines[i]);
-      i += 1;
-      continue;
-    }
-
-    i += 1;
-    while (i < lines.length && !TOML_TABLE_HEADER_PATTERN.test(lines[i])) {
-      i += 1;
-    }
-  }
-
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+function buildManagedCodexHookTrustStateForConfig(
+  codexHooksFile: string | undefined,
+  pkgRoot: string,
+  options: ManagedCodexHookOptions = {},
+): ManagedCodexHookTrustStateMap {
+  if (!codexHooksFile) return {};
+  return buildManagedCodexHookTrustState(codexHooksFile, pkgRoot, options);
 }
 
 export function upsertManagedCodexHookTrustState(
@@ -886,10 +1196,18 @@ export function upsertManagedCodexHookTrustState(
   codexHooksFile: string | undefined,
   options: ManagedCodexHookOptions = {},
 ): string {
-  const hookTrustToml = buildManagedCodexHookTrustToml(codexHooksFile, pkgRoot, options);
-  const stripped = stripUnfencedManagedCodexHookTrustState(
-    stripManagedCodexHookTrustState(config),
-    hookTrustToml,
+  const managedTrustState = buildManagedCodexHookTrustStateForConfig(
+    codexHooksFile,
+    pkgRoot,
+    options,
+  );
+  const strippedResult = stripManagedCodexHookTrustStateWithResult(config, {
+    managedTrustState,
+  });
+  const stripped = strippedResult.config;
+  const hookTrustToml = renderManagedCodexHookTrustToml(
+    managedTrustState,
+    strippedResult.preservedConflictKeys,
   );
   if (!hookTrustToml) return `${stripped}\n`;
   return [
@@ -2009,6 +2327,7 @@ function getOmxTablesBlock(
   codexHooksFile?: string,
   hookOptions: ManagedCodexHookOptions = {},
   includeFirstPartyMcp = false,
+  excludedHookTrustStateKeys: ReadonlySet<string> = new Set(),
 ): string {
   const lines = [
     "",
@@ -2036,10 +2355,13 @@ function getOmxTablesBlock(
     }
   }
 
-  const hookTrustToml = buildManagedCodexHookTrustToml(
-    codexHooksFile,
-    pkgRoot,
-    hookOptions,
+  const hookTrustToml = renderManagedCodexHookTrustToml(
+    buildManagedCodexHookTrustStateForConfig(
+      codexHooksFile,
+      pkgRoot,
+      hookOptions,
+    ),
+    excludedHookTrustStateKeys,
   );
   if (hookTrustToml) {
     lines.push("");
@@ -2078,7 +2400,7 @@ function getOmxTablesBlock(
  * Layout:
  *   1. OMX top-level keys (notify, model_reasoning_effort, developer_instructions)
  *   2. [features] with multi_agent + child_agents_md + hooks + goals
- *   3. [shell_environment_policy.set] with defaulted explore-routing opt-in
+ *   3. [shell_environment_policy.set] with defaulted deprecated explore-routing opt-out
  *   4. … user sections …
  *   5. OMX [table] sections (mcp_servers, tui)
  */
@@ -2121,14 +2443,18 @@ export function buildMergedConfig(
     existing = `${`notify = ${formatTomlStringArray(userNotifyToPreserve)}`}\n${existing.trimStart()}`;
   }
   existing = stripOrphanedManagedNotify(existing, pkgRoot);
-  existing = stripManagedCodexHookTrustState(existing);
-  existing = stripUnfencedManagedCodexHookTrustState(
-    existing,
-    buildManagedCodexHookTrustToml(options.codexHooksFile, pkgRoot, {
+  const managedTrustState = buildManagedCodexHookTrustStateForConfig(
+    options.codexHooksFile,
+    pkgRoot,
+    {
       codexHomeDir: options.codexHomeDir,
       platform: options.hookCommandPlatform,
-    }),
+    },
   );
+  const hookTrustStrip = stripManagedCodexHookTrustStateWithResult(existing, {
+    managedTrustState,
+  });
+  existing = hookTrustStrip.config;
   if (options.modelOverride) {
     existing = stripRootLevelKeys(existing, ["model"]);
   }
@@ -2164,6 +2490,7 @@ export function buildMergedConfig(
       platform: options.hookCommandPlatform,
     },
     options.includeFirstPartyMcp === true,
+    hookTrustStrip.preservedConflictKeys,
   );
   const sharedRegistryBlock = getSharedMcpRegistryBlock(
     options.sharedMcpServers ?? [],

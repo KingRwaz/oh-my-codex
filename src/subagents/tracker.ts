@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { getBaseStateDir } from '../state/paths.js';
 
 export const SUBAGENT_TRACKING_SCHEMA_VERSION = 1;
 export const DEFAULT_SUBAGENT_ACTIVE_WINDOW_MS = 120_000;
@@ -10,9 +11,12 @@ export interface TrackedSubagentThread {
   kind: 'leader' | 'subagent';
   first_seen_at: string;
   last_seen_at: string;
+  completed_at?: string;
   last_turn_id?: string;
+  last_completed_turn_id?: string;
   turn_count: number;
   mode?: string;
+  completion_source?: string;
 }
 
 export interface TrackedSubagentSession {
@@ -33,6 +37,10 @@ export interface RecordSubagentTurnInput {
   turnId?: string;
   timestamp?: string;
   mode?: string;
+  kind?: 'leader' | 'subagent';
+  leaderThreadId?: string;
+  completed?: boolean;
+  completionSource?: string;
 }
 
 export interface SubagentSessionSummary {
@@ -45,7 +53,7 @@ export interface SubagentSessionSummary {
 }
 
 export function subagentTrackingPath(cwd: string): string {
-  return join(cwd, '.omx', 'state', 'subagent-tracking.json');
+  return join(getBaseStateDir(cwd), 'subagent-tracking.json');
 }
 
 export function createSubagentTrackingState(): SubagentTrackingState {
@@ -53,6 +61,17 @@ export function createSubagentTrackingState(): SubagentTrackingState {
     schemaVersion: SUBAGENT_TRACKING_SCHEMA_VERSION,
     sessions: {},
   };
+}
+
+export function isTrustedSubagentThread(
+  session: TrackedSubagentSession | null | undefined,
+  threadId: string,
+): boolean {
+  const normalizedThreadId = threadId.trim();
+  if (!session || !normalizedThreadId) return false;
+  const leaderThreadId = session.leader_thread_id?.trim();
+  if (leaderThreadId && leaderThreadId === normalizedThreadId) return false;
+  return session.threads[normalizedThreadId]?.kind === 'subagent';
 }
 
 export function normalizeSubagentTrackingState(input: unknown): SubagentTrackingState {
@@ -88,10 +107,17 @@ export function normalizeSubagentTrackingState(input: unknown): SubagentTracking
         ...(typeof candidate.last_turn_id === 'string' && candidate.last_turn_id.trim().length > 0
           ? { last_turn_id: candidate.last_turn_id }
           : {}),
+        ...(typeof candidate.completed_at === 'string' && candidate.completed_at.trim().length > 0
+          ? { completed_at: candidate.completed_at }
+          : {}),
+        ...(typeof candidate.last_completed_turn_id === 'string' && candidate.last_completed_turn_id.trim().length > 0
+          ? { last_completed_turn_id: candidate.last_completed_turn_id }
+          : {}),
         turn_count: typeof candidate.turn_count === 'number' && Number.isFinite(candidate.turn_count) && candidate.turn_count > 0
           ? candidate.turn_count
           : 1,
         ...(typeof candidate.mode === 'string' && candidate.mode.trim().length > 0 ? { mode: candidate.mode } : {}),
+        ...(typeof candidate.completion_source === 'string' && candidate.completion_source.trim().length > 0 ? { completion_source: candidate.completion_source } : {}),
       };
     }
 
@@ -130,7 +156,7 @@ export async function readSubagentTrackingState(cwd: string): Promise<SubagentTr
 export async function writeSubagentTrackingState(cwd: string, state: SubagentTrackingState): Promise<string> {
   const normalized = normalizeSubagentTrackingState(state);
   const path = subagentTrackingPath(cwd);
-  await mkdir(join(cwd, '.omx', 'state'), { recursive: true });
+  await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(normalized, null, 2)}\n`);
   return path;
 }
@@ -151,15 +177,50 @@ export function recordSubagentTurn(
     threads: {},
   };
 
-  const leaderThreadId = existingSession.leader_thread_id || threadId;
+  const requestedKind = input.kind === 'leader' || input.kind === 'subagent' ? input.kind : undefined;
+  const requestedLeaderThreadId = input.leaderThreadId?.trim();
   const existingThread = existingSession.threads[threadId];
+  const existingKind = existingThread?.kind === 'leader' || existingThread?.kind === 'subagent'
+    ? existingThread.kind
+    : undefined;
+  const existingLeaderThreadId = existingSession.leader_thread_id?.trim();
+  // `leader_thread_id` is the session's top-level leader boundary.  A native
+  // subagent can itself be the immediate parent of a nested native role, but
+  // that must not reclassify known subagent evidence as the session leader.
+  const requestedLeaderThread = requestedLeaderThreadId
+    ? existingSession.threads[requestedLeaderThreadId]
+    : undefined;
+  const requestedLeaderWouldReclassifySubagent = requestedLeaderThread?.kind === 'subagent';
+  const requestedSessionLeaderThreadId = requestedLeaderWouldReclassifySubagent
+    ? undefined
+    : requestedLeaderThreadId;
+  const preserveExistingSubagent = existingKind === 'subagent' && requestedKind !== 'subagent';
+  const preserveKnownLeader = requestedKind === 'subagent'
+    && (existingKind === 'leader' || existingLeaderThreadId === threadId);
+  const leaderThreadId = preserveKnownLeader
+    ? existingLeaderThreadId || threadId
+    : existingLeaderThreadId
+      || requestedSessionLeaderThreadId
+      || (requestedKind === 'subagent' || preserveExistingSubagent ? undefined : threadId);
+  const kind = preserveKnownLeader
+    ? 'leader'
+    : requestedKind === 'leader' && existingKind === 'subagent'
+      ? 'subagent'
+      : requestedKind ?? (threadId === leaderThreadId ? 'leader' : existingKind ?? 'subagent');
   const nextThread: TrackedSubagentThread = {
     thread_id: threadId,
-    kind: threadId === leaderThreadId ? 'leader' : 'subagent',
+    kind,
     first_seen_at: existingThread?.first_seen_at ?? timestamp,
     last_seen_at: timestamp,
     turn_count: (existingThread?.turn_count ?? 0) + 1,
     ...(input.turnId?.trim() ? { last_turn_id: input.turnId.trim() } : existingThread?.last_turn_id ? { last_turn_id: existingThread.last_turn_id } : {}),
+    ...(input.completed
+      ? {
+          completed_at: timestamp,
+          ...(input.turnId?.trim() ? { last_completed_turn_id: input.turnId.trim() } : {}),
+          ...(input.completionSource?.trim() ? { completion_source: input.completionSource.trim() } : {}),
+        }
+      : {}),
     ...(input.mode?.trim() ? { mode: input.mode.trim() } : existingThread?.mode ? { mode: existingThread.mode } : {}),
   };
 
@@ -176,7 +237,7 @@ export function recordSubagentTurn(
 
   normalized.sessions[sessionId] = {
     session_id: sessionId,
-    leader_thread_id: leaderThreadId,
+    ...(leaderThreadId ? { leader_thread_id: leaderThreadId } : {}),
     updated_at: timestamp,
     threads,
   };
@@ -207,10 +268,11 @@ export function summarizeSubagentSession(
       : Date.now();
 
   const allThreadIds = Object.keys(session.threads).sort();
-  const allSubagentThreadIds = allThreadIds.filter((threadId) => session.threads[threadId]?.kind === 'subagent');
+  const allSubagentThreadIds = allThreadIds.filter((threadId) => isTrustedSubagentThread(session, threadId));
   const activeSubagentThreadIds = allSubagentThreadIds.filter((threadId) => {
     const thread = session.threads[threadId];
     if (!thread) return false;
+    if (thread.completed_at) return false;
     const seenAt = Date.parse(thread.last_seen_at);
     if (!Number.isFinite(seenAt)) return false;
     return nowMs - seenAt <= activeWindowMs;

@@ -62,6 +62,15 @@ describe("generateOverlay", () => {
     assert.ok(overlay.includes("<!-- OMX:RUNTIME:END -->"));
     assert.ok(overlay.includes("test-session-1"));
     assert.ok(overlay.includes("Compaction Protocol"));
+    assert.ok(overlay.includes("preflight-context.json"));
+  });
+
+  it("injects mandatory native subagent agent_type routing guidance", async () => {
+    const overlay = await generateOverlay(tempDir, "native-subagent-routing");
+    assert.match(overlay, /\*\*Native Subagent Routing:\*\*/);
+    assert.match(overlay, /always set `agent_type` to an installed OMX role/i);
+    assert.match(overlay, /Never omit `agent_type`/i);
+    assert.match(overlay, /default subagents/i);
   });
 
   it("includes the team orchestrator overlay only when orchestration mode is team", async () => {
@@ -77,27 +86,16 @@ describe("generateOverlay", () => {
     assert.doesNotMatch(defaultOverlay, /\*\*Orchestration Mode:\*\* team/);
   });
 
-  it("adds advisory explore routing guidance by default and hides it only on explicit opt-out", async () => {
+  it("adds repository-lookup routing guidance without referencing the removed explore command", async () => {
     const previous = process.env.USE_OMX_EXPLORE_CMD;
     try {
       delete process.env.USE_OMX_EXPLORE_CMD;
-      const defaultOverlay = await generateOverlay(
-        tempDir,
-        "explore-routing-default",
-      );
-      assert.match(
-        defaultOverlay,
-        /\*\*Explore Command Preference:\*\*/,
-      );
-      assert.match(defaultOverlay, /default-on; opt out/i);
-      assert.match(defaultOverlay, /omx explore` FIRST before attempting full code analysis/i);
-
-      process.env.USE_OMX_EXPLORE_CMD = "off";
-      const disabledOverlay = await generateOverlay(
-        tempDir,
-        "explore-routing-off",
-      );
-      assert.doesNotMatch(disabledOverlay, /\*\*Explore Command Preference:\*\*/);
+      const overlay = await generateOverlay(tempDir, "explore-routing-default");
+      assert.match(overlay, /\*\*Repository Lookup Routing:\*\*/);
+      assert.match(overlay, /normal Codex repository inspection/i);
+      assert.match(overlay, /omx sparkshell -- <command>/);
+      assert.doesNotMatch(overlay, /omx explore/i);
+      assert.doesNotMatch(overlay, /USE_OMX_EXPLORE_CMD/);
     } finally {
       if (typeof previous === "string")
         process.env.USE_OMX_EXPLORE_CMD = previous;
@@ -118,6 +116,15 @@ describe("generateOverlay", () => {
         current_phase: "executing",
       }),
     );
+    await writeFile(
+      join(sessionDir, "skill-active-state.json"),
+      JSON.stringify({
+        active: true,
+        skill: "ralph",
+        phase: "executing",
+        session_id: sessionId,
+      }),
+    );
     const overlay = await generateOverlay(tempDir, sessionId);
     assert.ok(overlay.includes("ralph"));
     assert.ok(overlay.includes("iteration 3/10"));
@@ -134,6 +141,15 @@ describe("generateOverlay", () => {
         iteration: 1,
         max_iterations: 5,
         current_phase: "running",
+      }),
+    );
+    await writeFile(
+      join(tempDir, ".omx", "state", "sessions", "sess1", "skill-active-state.json"),
+      JSON.stringify({
+        active: true,
+        skill: "team",
+        phase: "running",
+        session_id: "sess1",
       }),
     );
     const overlay = await generateOverlay(tempDir, "sess1");
@@ -263,6 +279,21 @@ describe("generateOverlay", () => {
       );
     }
     await writeFile(
+      join(sessionDir, "skill-active-state.json"),
+      JSON.stringify({
+        active: true,
+        skill: "mode-0",
+        phase: "run",
+        session_id: sessionId,
+        active_skills: Array.from({ length: 40 }, (_, i) => ({
+          skill: `mode-${i}`,
+          phase: "run",
+          active: true,
+          session_id: sessionId,
+        })),
+      }),
+    );
+    await writeFile(
       join(tempDir, ".omx", "notepad.md"),
       `## PRIORITY\n${"N".repeat(8000)}`,
     );
@@ -311,12 +342,48 @@ describe("generateOverlay", () => {
         current_phase: "starting",
       }),
     );
+    await writeFile(
+      join(sessionDir, "skill-active-state.json"),
+      JSON.stringify({
+        active: true,
+        skill: "ralph",
+        phase: "starting",
+        session_id: sessionId,
+      }),
+    );
     await mkdir(join(tempDir, ".omx", "plans"), { recursive: true });
 
     const overlay = await generateOverlay(tempDir, sessionId);
     assert.match(overlay, /\*\*Ralph Ralplan-First Gate:\*\* BLOCKED/);
     assert.match(overlay, /`prd-\*\.md`/);
     assert.match(overlay, /`test-spec-\*\.md`/);
+  });
+
+  it("does not activate ralph planning gate from stale detail-only session state", async () => {
+    const sessionId = "ralph-gate-stale-detail";
+    const sessionDir = join(tempDir, ".omx", "state", "sessions", sessionId);
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, "ralph-state.json"),
+      JSON.stringify({
+        active: true,
+        iteration: 0,
+        max_iterations: 50,
+        current_phase: "starting",
+      }),
+    );
+    await writeFile(
+      join(sessionDir, "skill-active-state.json"),
+      JSON.stringify({
+        active: true,
+        skill: "team",
+        phase: "running",
+        session_id: sessionId,
+      }),
+    );
+
+    const overlay = await generateOverlay(tempDir, sessionId);
+    assert.doesNotMatch(overlay, /Ralph Ralplan-First Gate/);
   });
 
   it("unlocks ralph planning gate when PRD and test spec exist", async () => {
@@ -330,6 +397,15 @@ describe("generateOverlay", () => {
         iteration: 1,
         max_iterations: 50,
         current_phase: "starting",
+      }),
+    );
+    await writeFile(
+      join(sessionDir, "skill-active-state.json"),
+      JSON.stringify({
+        active: true,
+        skill: "ralph",
+        phase: "starting",
+        session_id: sessionId,
       }),
     );
     const plansDir = join(tempDir, ".omx", "plans");
@@ -494,6 +570,38 @@ describe("resolveSessionOrchestrationMode", () => {
     const overlay = await generateOverlay(tempDir, sessionId);
     assert.ok(overlay.includes("- team: phase: running"));
     assert.equal(overlay.includes("- autoresearch:"), false);
+  });
+
+  it("active mode summary reads canonical state from OMX_TEAM_STATE_ROOT", async () => {
+    const sessionId = "sess-overlay-team-root";
+    const teamStateRoot = join(tempDir, "team-state-root");
+    const sessionDir = join(teamStateRoot, "sessions", sessionId);
+    const previousTeamStateRoot = process.env.OMX_TEAM_STATE_ROOT;
+    try {
+      process.env.OMX_TEAM_STATE_ROOT = teamStateRoot;
+      await mkdir(sessionDir, { recursive: true });
+      await writeFile(
+        join(sessionDir, "skill-active-state.json"),
+        JSON.stringify({
+          active: true,
+          skill: "team",
+          phase: "team-exec",
+          session_id: sessionId,
+          active_skills: [{ skill: "team", phase: "team-exec", active: true, session_id: sessionId }],
+        }),
+      );
+      await writeFile(
+        join(sessionDir, "team-state.json"),
+        JSON.stringify({ active: true, team_name: "rooted" }),
+      );
+
+      const overlay = await generateOverlay(tempDir, sessionId);
+
+      assert.ok(overlay.includes("- team: phase: team-exec"));
+    } finally {
+      if (typeof previousTeamStateRoot === "string") process.env.OMX_TEAM_STATE_ROOT = previousTeamStateRoot;
+      else delete process.env.OMX_TEAM_STATE_ROOT;
+    }
   });
 });
 

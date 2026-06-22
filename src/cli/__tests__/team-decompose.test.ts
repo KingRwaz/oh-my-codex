@@ -119,12 +119,17 @@ describe('decomposeTaskString', () => {
   });
 
   it('keeps explicit worker-count small tasks conservative only when count is implicit', () => {
-    const implicitTasks = decomposeTaskString('fix typo in README', 3, 'executor', false, false);
-    assert.equal(implicitTasks.length, 1);
-    assert.equal(implicitTasks[0].owner, 'worker-1');
+    const implicitPlan = buildTeamExecutionPlan('fix typo in README', 3, 'executor', false, false);
+    assert.equal(implicitPlan.workerCount, 1);
+    assert.equal(implicitPlan.tasks.length, 1);
+    assert.equal(implicitPlan.tasks[0].owner, 'worker-1');
+    assert.equal(implicitPlan.overOrchestrationNotice?.code, 'team_over_orchestration_warning');
+    assert.match(implicitPlan.overOrchestrationNotice?.message ?? '', /solo execution path/i);
 
-    const explicitTasks = decomposeTaskString('fix typo in README', 3, 'executor', false, true);
-    assert.equal(explicitTasks.length, 3);
+    const explicitPlan = buildTeamExecutionPlan('fix typo in README', 3, 'executor', false, true);
+    assert.equal(explicitPlan.workerCount, 3);
+    assert.equal(explicitPlan.tasks.length, 3);
+    assert.equal(explicitPlan.overOrchestrationNotice?.code, 'explicit_team_override_acknowledged');
   });
 
   it('keeps medium-sized coupled implementation prompts single-lane by default', () => {

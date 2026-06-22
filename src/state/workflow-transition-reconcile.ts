@@ -19,6 +19,10 @@ import {
 } from './skill-active.js';
 import { applyRunOutcomeContract } from '../runtime/run-outcome.js';
 import { clearDeepInterviewQuestionObligation } from '../question/deep-interview.js';
+import {
+  buildAutopilotDeepInterviewRalplanGateError,
+  canAdvanceAutopilotDeepInterviewToRalplan,
+} from '../autopilot/deep-interview-gate.js';
 
 interface TransitionStateLike {
   active?: unknown;
@@ -69,6 +73,18 @@ function modeStatePathForRoot(
   return getStatePath(mode, cwd, sessionId);
 }
 
+
+async function assertAuthoritativeWorkflowStateReadable(
+  cwd: string,
+  sessionId?: string,
+  baseStateDir?: string,
+): Promise<void> {
+  for (const mode of TRACKED_WORKFLOW_MODES) {
+    const candidatePath = modeStatePathForRoot(mode, cwd, sessionId, baseStateDir);
+    await readJsonIfExists(candidatePath, { mode, throwOnParseError: true });
+  }
+}
+
 async function visibleTrackedModes(
   cwd: string,
   sessionId?: string,
@@ -82,21 +98,7 @@ async function visibleTrackedModes(
     .map((entry) => entry.skill)
     .filter(isTrackedWorkflowMode);
 
-  const visibleModes = new Set<TrackedWorkflowMode>(canonicalModes);
-  for (const mode of TRACKED_WORKFLOW_MODES) {
-    const candidatePaths = [modeStatePathForRoot(mode, cwd, sessionId, baseStateDir)];
-    for (const candidatePath of candidatePaths) {
-      const state = await readJsonIfExists(candidatePath, {
-        mode,
-        throwOnParseError: true,
-      });
-      if (state?.active === true) {
-        visibleModes.add(mode);
-      }
-    }
-  }
-
-  return [...visibleModes];
+  return [...new Set(canonicalModes)];
 }
 
 async function completeSourceModeState(
@@ -113,8 +115,22 @@ async function completeSourceModeState(
   const completedPaths: string[] = [];
 
   for (const candidatePath of candidatePaths) {
-    const existing = await readJsonIfExists(candidatePath);
+    const existing = await readJsonIfExists(candidatePath, {
+      mode: sourceMode,
+      throwOnParseError: true,
+    });
     if (!existing || existing.active !== true) continue;
+    if (sourceMode === 'deep-interview' && destinationMode === 'ralplan') {
+      const gate = await canAdvanceAutopilotDeepInterviewToRalplan({
+        cwd,
+        sessionId,
+        baseStateDir,
+        deepInterviewState: existing,
+      });
+      if (!gate.allowed) {
+        throw new Error(buildAutopilotDeepInterviewRalplanGateError(gate));
+      }
+    }
 
     const nextCandidate: TransitionStateLike = {
       ...existing,
@@ -146,6 +162,16 @@ async function completeSourceModeState(
     completedPaths.push(candidatePath);
   }
 
+  if (sourceMode === 'deep-interview' && destinationMode === 'ralplan' && completedPaths.length === 0) {
+    const gate = await canAdvanceAutopilotDeepInterviewToRalplan({
+      cwd,
+      sessionId,
+      baseStateDir,
+      deepInterviewState: null,
+    });
+    throw new Error(buildAutopilotDeepInterviewRalplanGateError(gate));
+  }
+
   await syncCanonicalSkillStateForMode({
     cwd,
     ...(baseStateDir ? { baseStateDir } : {}),
@@ -158,6 +184,28 @@ async function completeSourceModeState(
   });
 
   return completedPaths;
+}
+
+export async function completeWorkflowModeState(
+  cwd: string,
+  sourceMode: TrackedWorkflowMode,
+  destinationMode: TrackedWorkflowMode,
+  options: {
+    sessionId?: string;
+    nowIso?: string;
+    source?: string;
+    baseStateDir?: string;
+  } = {},
+): Promise<string[]> {
+  return completeSourceModeState(
+    cwd,
+    options.baseStateDir,
+    sourceMode,
+    destinationMode,
+    options.sessionId,
+    options.nowIso ?? new Date().toISOString(),
+    options.source ?? 'workflow-transition',
+  );
 }
 
 export async function reconcileWorkflowTransition(
@@ -179,6 +227,9 @@ export async function reconcileWorkflowTransition(
     source = 'workflow-transition',
     baseStateDir,
   } = options;
+  if (!options.currentModes) {
+    await assertAuthoritativeWorkflowStateReadable(cwd, sessionId, baseStateDir);
+  }
   const currentModes = options.currentModes
     ? [...options.currentModes].filter(isTrackedWorkflowMode)
     : await visibleTrackedModes(cwd, sessionId, baseStateDir);

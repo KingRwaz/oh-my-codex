@@ -1,11 +1,12 @@
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, utimesSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir as fsReaddir, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, utimesSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir as fsReaddir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import TOML from "@iarna/toml";
 import {
   HELP,
   normalizeCodexLaunchArgs,
@@ -15,6 +16,7 @@ import {
   buildWindowsPromptCommand,
   buildTmuxSessionName,
   resolveCliInvocation,
+  resolveUpdateChannelArg,
   commandOwnsLocalHelp,
   resolveCodexLaunchPolicy,
   resolveEffectiveLeaderLaunchPolicyOverride,
@@ -34,6 +36,7 @@ import {
   resolveSetupInstallModeArg,
   resolveSetupMcpModeArg,
   resolveSetupScopeArg,
+  resolveSetupTeamModeArg,
   resolveLaunchConfigRepairOptions,
   readPersistedSetupPreferences,
   readPersistedSetupScope,
@@ -43,14 +46,18 @@ import {
   shouldAutoIsolateMadmaxLaunch,
   createMadmaxIsolatedRoot,
   buildMadmaxDetachedLaunchContextKey,
+  withMadmaxDetachedContextLock,
   resolveOmxRootForLaunch,
   resolveDisposableWorktreeOmxRootForLaunch,
   prepareCodexHomeForLaunch,
   persistProjectLaunchRuntimeAuthState,
+  persistProjectLaunchRuntimeProjectTrustState,
+  cleanupRuntimeCodexHome,
   runtimeCodexHomePath,
   buildDetachedSessionBootstrapSteps,
   buildDetachedTmuxSessionName,
   buildDetachedSessionFinalizeSteps,
+  shouldAttachDetachedTmuxSession,
   buildDetachedSessionRollbackSteps,
   detectDetachedSessionWindowIndex,
   resolveNotifyTempContract,
@@ -72,13 +79,22 @@ import {
   releaseTmuxExtendedKeysLease,
   withTmuxExtendedKeys,
   serializeDetachedSessionParentEnv,
+  buildInsideTmuxHudHookEnv,
+  registerInsideTmuxHudResizeHook,
+  buildDetachedHudHookEnv,
+  registerDetachedHudLayoutReconcileHook,
+  ensureOmxRuntimeCommandShim,
+  omxRuntimeCommandShimPath,
+  prependOmxRuntimeCommandShimToEnv,
   CODEX_SQLITE_HOME_ENV,
+  DETACHED_TMUX_HISTORY_LIMIT,
+  isExistingTmuxWindowTooCrampedForLaunchHud,
 } from "../index.js";
 import { mergeConfig, repairConfigIfNeeded } from "../../config/generator.js";
 import { ensureReusableNodeModules } from "../../utils/repo-deps.js";
 import { readAllState } from "../../hud/state.js";
 import { generateOverlay } from "../../hooks/agents-overlay.js";
-import { HUD_TMUX_HEIGHT_LINES } from "../../hud/constants.js";
+import { HUD_TMUX_HEIGHT_LINES, HUD_TMUX_MIN_LAUNCH_WINDOW_HEIGHT_LINES } from "../../hud/constants.js";
 import { createHudWatchPane as createSharedHudWatchPane, listCurrentWindowHudPaneIds } from "../../hud/tmux.js";
 import {
   DEFAULT_FRONTIER_MODEL,
@@ -95,6 +111,10 @@ function normalizeDarwinTmpPath(value: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function countMatches(text: string, pattern: RegExp): number {
+  return text.match(pattern)?.length ?? 0;
 }
 
 function expectedLowComplexityModel(codexHomeOverride?: string): string {
@@ -151,34 +171,34 @@ describe("madmax state isolation", () => {
       const env: NodeJS.ProcessEnv = { OMX_RUNS_DIR: runs };
       const runDir = createMadmaxIsolatedRoot(wd, ["--madmax", "--xhigh", "--tmux"], env);
       const metadata = JSON.parse(await readFile(join(runDir, ".omxbox-run.json"), "utf-8"));
-      const expectedContext = buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh", "--tmux"]);
+      const expectedContext = buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh", "--tmux"], runDir);
       assert.equal(metadata.detached_launch_context, expectedContext);
       assert.equal(env.OMX_MADMAX_DETACHED_CONTEXT, expectedContext);
       assert.equal(
-        expectedContext,
-        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh"]),
+        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh", "--tmux"], runDir),
+        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh"], runDir),
         "explicit --tmux is a transport choice and must not create a second context",
       );
       assert.equal(
-        expectedContext,
-        buildMadmaxDetachedLaunchContextKey(wd, ["--xhigh", "--madmax", "--direct"]),
+        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh", "--tmux"], runDir),
+        buildMadmaxDetachedLaunchContextKey(wd, ["--xhigh", "--madmax", "--direct"], runDir),
         "argument order and transport choices must not create duplicate detached contexts",
       );
       assert.notEqual(
         expectedContext,
-        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--low"]),
+        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--low"], runDir),
         "different launch semantics may run concurrently",
       );
       assert.notEqual(
-        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--high", "--xhigh"]),
-        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh", "--high"]),
+        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--high", "--xhigh"], runDir),
+        buildMadmaxDetachedLaunchContextKey(wd, ["--madmax", "--xhigh", "--high"], runDir),
         "last reasoning shorthand wins, so reversed reasoning order is a distinct context",
       );
       const otherWd = await mkdtemp(join(tmpdir(), "omx-madmax-other-source-"));
       try {
         assert.notEqual(
           expectedContext,
-          buildMadmaxDetachedLaunchContextKey(otherWd, ["--madmax", "--xhigh"]),
+          buildMadmaxDetachedLaunchContextKey(otherWd, ["--madmax", "--xhigh"], runDir),
           "different work contexts may run concurrently",
         );
       } finally {
@@ -186,6 +206,95 @@ describe("madmax state isolation", () => {
       }
     } finally {
       await rm(wd, { recursive: true, force: true });
+      await rm(runs, { recursive: true, force: true });
+    }
+  });
+
+  it("gives independent madmax run roots distinct detached launch context locks", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-madmax-source-"));
+    const runs = await mkdtemp(join(tmpdir(), "omx-madmax-runs-"));
+    try {
+      const firstEnv: NodeJS.ProcessEnv = { OMX_RUNS_DIR: runs };
+      const secondEnv: NodeJS.ProcessEnv = { OMX_RUNS_DIR: runs };
+      const firstRunDir = createMadmaxIsolatedRoot(wd, ["--madmax", "--high"], firstEnv);
+      const secondRunDir = createMadmaxIsolatedRoot(wd, ["--madmax", "--high"], secondEnv);
+
+      assert.notEqual(firstRunDir, secondRunDir);
+      assert.notEqual(
+        firstEnv.OMX_MADMAX_DETACHED_CONTEXT,
+        secondEnv.OMX_MADMAX_DETACHED_CONTEXT,
+        "same cwd and argv from independent boxed runs must not contend on one active-detached lock",
+      );
+      assert.equal(
+        firstEnv.OMX_MADMAX_DETACHED_CONTEXT,
+        buildMadmaxDetachedLaunchContextKey(wd, ["--high", "--madmax", "--tmux"], firstRunDir),
+        "transport and order normalization still deduplicates within the same isolated run",
+      );
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+      await rm(runs, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a madmax detached context lock whose holder pid has already exited", async () => {
+    const runs = await mkdtemp(join(tmpdir(), "omx-madmax-lock-stale-"));
+    try {
+      const contextKey = "stale-context";
+      const lockPath = join(runs, "active-detached", `${contextKey}.lock`);
+      mkdirSync(lockPath, { recursive: true });
+      await writeFile(join(lockPath, "pid"), "2147483647");
+
+      let ran = false;
+      const result = withMadmaxDetachedContextLock(
+        runs,
+        contextKey,
+        () => {
+          ran = true;
+          return "acquired";
+        },
+        { maxAttempts: 2, retryMs: 0 },
+      );
+
+      assert.equal(result, "acquired");
+      assert.equal(ran, true);
+      assert.equal(existsSync(lockPath), false);
+    } finally {
+      await rm(runs, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a live madmax detached context lock and reports holder diagnostics on timeout", async () => {
+    const runs = await mkdtemp(join(tmpdir(), "omx-madmax-lock-live-"));
+    try {
+      const contextKey = "live-context";
+      const lockPath = join(runs, "active-detached", `${contextKey}.lock`);
+      mkdirSync(lockPath, { recursive: true });
+      await writeFile(
+        join(lockPath, "owner.json"),
+        `${JSON.stringify({
+          version: 1,
+          pid: process.pid,
+          context_key: contextKey,
+          acquired_at: new Date().toISOString(),
+        })}\n`,
+      );
+      await writeFile(join(lockPath, "pid"), String(process.pid));
+
+      assert.throws(
+        () => withMadmaxDetachedContextLock(runs, contextKey, () => "should-not-run", { maxAttempts: 1, retryMs: 0 }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.match(err.message, /timed out waiting for madmax detached launch context lock/);
+          assert.match(err.message, new RegExp(`holder pid ${process.pid} is still running`));
+          assert.match(err.message, /owner context live-context/);
+          assert.match(err.message, /Another madmax detached launch is active for this directory/);
+          assert.match(err.message, /close the existing madmax session or use --worktree for concurrent work/);
+          assert.match(err.message, /Multiple madmax sessions in one directory are unsafe/);
+          return true;
+        },
+      );
+      assert.equal(existsSync(lockPath), true);
+    } finally {
       await rm(runs, { recursive: true, force: true });
     }
   });
@@ -1443,6 +1552,7 @@ describe("resolveWorkerSparkModel", () => {
   });
 
   it("reads low-complexity team model from config when codexHomeOverride is provided", async () => {
+    // Intentional legacy model fixture: verifies an explicit user override is routed to workers unchanged.
     const codexHome = await mkdtemp(join(tmpdir(), "omx-codex-home-"));
     try {
       await writeFile(
@@ -1507,12 +1617,17 @@ describe("commandOwnsLocalHelp", () => {
       "question",
       "autoresearch",
       "deepinit",
+      "explore",
       "hooks",
       "hud",
+      "notepad",
+      "project-memory",
       "ralph",
       "resume",
       "session",
       "sparkshell",
+      "trace",
+      "code-intel",
       "team",
       "tmux-hook",
     ]) {
@@ -1621,6 +1736,20 @@ describe("resolveCliInvocation", () => {
     });
   });
 
+  it("resolves update channel flags and rejects invalid combinations", () => {
+    assert.equal(resolveUpdateChannelArg([]), "stable");
+    assert.equal(resolveUpdateChannelArg(["--stable"]), "stable");
+    assert.equal(resolveUpdateChannelArg(["--dev"]), "dev");
+    assert.throws(
+      () => resolveUpdateChannelArg(["--dev", "--stable"]),
+      /mutually exclusive/,
+    );
+    assert.throws(
+      () => resolveUpdateChannelArg(["--beta"]),
+      /Unknown omx update option: --beta/,
+    );
+  });
+
   it("resolves hooks to hooks command", () => {
     assert.deepEqual(resolveCliInvocation(["hooks"]), {
       command: "hooks",
@@ -1671,7 +1800,9 @@ describe("resolveCliInvocation", () => {
   });
 
   it("advertises the explicit update command in top-level help", () => {
-    assert.match(HELP, /omx update\s+Check npm now, update the global install immediately, then refresh setup/);
+    assert.match(HELP, /omx update\s+Install the stable channel now, then refresh setup/);
+    assert.match(HELP, /omx update --stable\s+Install\/rollback to npm stable \(oh-my-codex@latest\), then refresh setup/);
+    assert.match(HELP, /omx update --dev\s+Install the upstream dev branch, then refresh setup/);
   });
 
   it("advertises concise launch policy controls in top-level help", () => {
@@ -1762,6 +1893,41 @@ describe("resolveSetupMcpModeArg", () => {
   });
 });
 
+describe("resolveSetupTeamModeArg", () => {
+  it("maps explicit setup Team mode flags", () => {
+    assert.equal(resolveSetupTeamModeArg(["--dry-run"]), undefined);
+    assert.equal(resolveSetupTeamModeArg(["--disable-team"]), "disabled");
+    assert.equal(resolveSetupTeamModeArg(["--no-team"]), "disabled");
+    assert.equal(resolveSetupTeamModeArg(["--enable-team"]), "enabled");
+    assert.equal(resolveSetupTeamModeArg(["--team"]), "enabled");
+    assert.equal(resolveSetupTeamModeArg(["--team-mode", "disabled"]), "disabled");
+    assert.equal(resolveSetupTeamModeArg(["--team-mode=enabled"]), "enabled");
+    assert.equal(
+      resolveSetupTeamModeArg(["--scope", "project", "--team-mode", "disabled"]),
+      "disabled",
+    );
+  });
+
+  it("rejects invalid or conflicting setup Team mode flags", () => {
+    assert.throws(
+      () => resolveSetupTeamModeArg(["--team-mode"]),
+      /Missing setup Team mode value after --team-mode/,
+    );
+    assert.throws(
+      () => resolveSetupTeamModeArg(["--team-mode", "minimal"]),
+      /Invalid setup Team mode: minimal/,
+    );
+    assert.throws(
+      () => resolveSetupTeamModeArg(["--disable-team", "--enable-team"]),
+      /Conflicting setup Team mode flags/,
+    );
+    assert.throws(
+      () => resolveSetupTeamModeArg(["--team-mode=enabled", "--no-team"]),
+      /Conflicting setup Team mode flags/,
+    );
+  });
+});
+
 describe("resolveSetupScopeArg", () => {
   it("returns undefined when scope is omitted", () => {
     assert.equal(resolveSetupScopeArg(["--dry-run"]), undefined);
@@ -1818,6 +1984,23 @@ describe("project launch scope helpers", () => {
       assert.deepEqual(readPersistedSetupPreferences(wd), {
         scope: "user",
         installMode: "plugin",
+      });
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("reads persisted setup Team mode when present", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-launch-scope-"));
+    try {
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project", teamMode: "disabled" }),
+      );
+      assert.deepEqual(readPersistedSetupPreferences(wd), {
+        scope: "project",
+        teamMode: "disabled",
       });
     } finally {
       await rm(wd, { recursive: true, force: true });
@@ -1991,6 +2174,128 @@ describe("project launch scope helpers", () => {
     }
   });
 
+  it("includes project Codex history artifacts in the runtime mirror for resume launches", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-resume-runtime-codex-home-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await mkdir(join(projectCodexHome, "sessions", "2026", "06", "03"), { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+      await writeFile(join(projectCodexHome, "config.toml"), 'model = "gpt-5.5"\n');
+      await writeFile(join(projectCodexHome, "state_5.sqlite"), "state db placeholder");
+      await writeFile(join(projectCodexHome, "state_5.sqlite-wal"), "state db wal placeholder");
+      await writeFile(join(projectCodexHome, "logs_2.sqlite-shm"), "logs db shm placeholder");
+      await writeFile(
+        join(projectCodexHome, "sessions", "2026", "06", "03", "rollout-session-2712.jsonl"),
+        '{"type":"session_meta","payload":{"id":"session-2712"}}\n',
+      );
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-resume", {}, {
+        includeHistoryArtifacts: true,
+      });
+      const runtimeCodexHome = runtimeCodexHomePath(wd, "session-resume");
+
+      assert.equal(prepared.codexHomeOverride, runtimeCodexHome);
+      assert.equal(prepared.sqliteHomeOverride, projectCodexHome);
+      assert.equal(existsSync(join(runtimeCodexHome, "state_5.sqlite")), true);
+      assert.equal(existsSync(join(runtimeCodexHome, "state_5.sqlite-wal")), true);
+      assert.equal(existsSync(join(runtimeCodexHome, "logs_2.sqlite-shm")), true);
+      assert.equal(
+        existsSync(join(runtimeCodexHome, "sessions", "2026", "06", "03", "rollout-session-2712.jsonl")),
+        true,
+      );
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("creates durable project Codex transcript links for project launches", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-runtime-history-links-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-history-links", {});
+      const runtimeCodexHome = runtimeCodexHomePath(wd, "session-history-links");
+
+      assert.equal(prepared.codexHomeOverride, runtimeCodexHome);
+      assert.equal((await lstat(join(runtimeCodexHome, "sessions"))).isSymbolicLink(), true);
+      assert.equal((await lstat(join(runtimeCodexHome, "history.jsonl"))).isSymbolicLink(), true);
+      assert.equal((await lstat(join(runtimeCodexHome, "session_index.jsonl"))).isSymbolicLink(), true);
+      await writeFile(
+        join(runtimeCodexHome, "sessions", "linked-rollout.jsonl"),
+        '{"type":"session_meta"}\n',
+      );
+      await writeFile(join(runtimeCodexHome, "history.jsonl"), '{"session_id":"linked"}\n');
+      await writeFile(join(runtimeCodexHome, "session_index.jsonl"), '{"id":"linked"}\n');
+
+      await cleanupRuntimeCodexHome(
+        prepared.runtimeCodexHomeForCleanup,
+        prepared.projectLocalCodexHomeForCleanup,
+      );
+
+      assert.equal(
+        await readFile(join(projectCodexHome, "sessions", "linked-rollout.jsonl"), "utf-8"),
+        '{"type":"session_meta"}\n',
+      );
+      assert.equal(await readFile(join(projectCodexHome, "history.jsonl"), "utf-8"), '{"session_id":"linked"}\n');
+      assert.equal(await readFile(join(projectCodexHome, "session_index.jsonl"), "utf-8"), '{"id":"linked"}\n');
+      assert.equal(existsSync(runtimeCodexHome), false);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("copies non-symlink runtime Codex transcript artifacts before cleanup", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-runtime-history-copyback-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await mkdir(projectCodexHome, { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-history-copyback", {});
+      const runtimeCodexHome = runtimeCodexHomePath(wd, "session-history-copyback");
+      await rm(join(runtimeCodexHome, "sessions"), { recursive: true, force: true });
+      await rm(join(runtimeCodexHome, "history.jsonl"), { force: true });
+      await rm(join(runtimeCodexHome, "session_index.jsonl"), { force: true });
+      await mkdir(join(runtimeCodexHome, "sessions", "2026", "06", "16"), { recursive: true });
+      await writeFile(
+        join(runtimeCodexHome, "sessions", "2026", "06", "16", "rollout-session-2835.jsonl"),
+        '{"type":"session_meta","payload":{"id":"session-2835"}}\n',
+      );
+      await writeFile(join(runtimeCodexHome, "history.jsonl"), '{"session_id":"session-2835"}\n');
+      await writeFile(join(runtimeCodexHome, "session_index.jsonl"), '{"id":"session-2835"}\n');
+      await writeFile(join(runtimeCodexHome, "auth.json"), '{"token":"opaque"}\n');
+
+      await cleanupRuntimeCodexHome(
+        prepared.runtimeCodexHomeForCleanup,
+        prepared.projectLocalCodexHomeForCleanup,
+      );
+
+      assert.equal(
+        await readFile(join(projectCodexHome, "sessions", "2026", "06", "16", "rollout-session-2835.jsonl"), "utf-8"),
+        '{"type":"session_meta","payload":{"id":"session-2835"}}\n',
+      );
+      assert.equal(await readFile(join(projectCodexHome, "history.jsonl"), "utf-8"), '{"session_id":"session-2835"}\n');
+      assert.equal(await readFile(join(projectCodexHome, "session_index.jsonl"), "utf-8"), '{"id":"session-2835"}\n');
+      assert.equal(await readFile(join(projectCodexHome, "auth.json"), "utf-8"), '{"token":"opaque"}\n');
+      assert.equal(existsSync(runtimeCodexHome), false);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it("uses a session-scoped CODEX_HOME mirror for project launch config writes", async () => {
     const wd = await mkdtemp(join(tmpdir(), "omx-launch-runtime-codex-home-"));
     try {
@@ -2029,8 +2334,10 @@ describe("project launch scope helpers", () => {
         await readFile(join(runtimeCodexHome, "agents", "planner.toml"), "utf-8"),
         'name = "planner"\n',
       );
-      assert.equal(await readFile(join(runtimeCodexHome, "hooks.json"), "utf-8"), '{"hooks":{}}\n');
-      assert.equal((await lstat(join(runtimeCodexHome, "hooks.json"))).isSymbolicLink(), false);
+      // GH #2470: hooks.json must NOT be mirrored into the runtime CODEX_HOME.
+      // Codex still loads the canonical project .codex/hooks.json as Project
+      // config; a runtime mirror would add a duplicate User config hook source.
+      assert.equal(existsSync(join(runtimeCodexHome, "hooks.json")), false);
       assert.equal(existsSync(join(runtimeCodexHome, "state_5.sqlite")), false);
       assert.equal(existsSync(join(runtimeCodexHome, "state_5.sqlite-wal")), false);
       assert.equal(existsSync(join(runtimeCodexHome, "logs_2.sqlite-shm")), false);
@@ -2082,7 +2389,208 @@ describe("project launch scope helpers", () => {
     }
   });
 
-  it("rewrites setup-owned hook trust state for the runtime CODEX_HOME mirror", async () => {
+  it("project-scope launch registers native hooks exactly once and persists trust state (GH #2470)", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-issue-2470-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await mkdir(projectCodexHome, { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+      const originalProjectConfig = [
+        'model = "gpt-5.5"',
+        "",
+        "[features]",
+        "hooks = true",
+        "",
+        "# OMX-owned Codex hook trust state",
+        "# Trusts only setup-managed codex-native-hook.js wrappers.",
+        `[hooks.state."${join(projectCodexHome, "hooks.json")}:pre_tool_use:0:0"]`,
+        'trusted_hash = "sha256:project-hooks-trusted"',
+        "# End OMX-owned Codex hook trust state",
+        "",
+      ].join("\n");
+      await writeFile(join(projectCodexHome, "config.toml"), originalProjectConfig);
+      await writeFile(join(projectCodexHome, "hooks.json"), '{"hooks":{}}\n');
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-2470", {});
+      const runtimeCodexHome = runtimeCodexHomePath(wd, "session-2470");
+
+      // 1. Hooks register exactly once: runtime CODEX_HOME holds no hooks.json
+      //    mirror, so Codex only sees the canonical project .codex/hooks.json.
+      assert.equal(prepared.codexHomeOverride, runtimeCodexHome);
+      assert.equal(existsSync(join(runtimeCodexHome, "hooks.json")), false);
+      assert.equal(existsSync(join(projectCodexHome, "hooks.json")), true);
+
+      // Simulate Codex writing workspace trust + a new hook trust ledger
+      // entry into the runtime config.toml during the session.
+      const runtimeConfigPath = join(runtimeCodexHome, "config.toml");
+      const runtimeConfigBefore = await readFile(runtimeConfigPath, "utf-8");
+      await writeFile(
+        runtimeConfigPath,
+        [
+          runtimeConfigBefore.replace(/\n+$/, ""),
+          "",
+          `[projects."${wd}"]`,
+          'trust_level = "trusted"',
+          "",
+          "[tui.model_availability_nux]",
+          '"gpt-5.5" = 1',
+          "",
+        ].join("\n"),
+      );
+
+      // 2. Workspace trust + ephemeral runtime state are persisted to the
+      //    project config.toml in a marker-fenced block; NUX counters and
+      //    other runtime-only writes are NOT leaked back to the project.
+      await persistProjectLaunchRuntimeProjectTrustState(
+        prepared.runtimeCodexHomeForCleanup,
+        prepared.projectLocalCodexHomeForCleanup,
+      );
+
+      const persistedProjectConfig = await readFile(
+        join(projectCodexHome, "config.toml"),
+        "utf-8",
+      );
+      assert.ok(
+        persistedProjectConfig.includes(
+          "# OMX-synced Codex project trust state",
+        ),
+        "expected synced-trust marker block in project config.toml",
+      );
+      assert.ok(
+        persistedProjectConfig.includes(`[projects."${wd}"]`),
+        "expected workspace trust entry to be persisted to project config.toml",
+      );
+      assert.ok(
+        persistedProjectConfig.includes('trust_level = "trusted"'),
+        "expected trust_level to be persisted to project config.toml",
+      );
+      assert.doesNotMatch(
+        persistedProjectConfig,
+        /model_availability_nux/,
+        "NUX counters must not leak into durable project config.toml",
+      );
+      const projectHookTrustHeader =
+        `[hooks.state."${join(projectCodexHome, "hooks.json")}:pre_tool_use:0:0"]`;
+      assert.ok(
+        persistedProjectConfig.includes(projectHookTrustHeader),
+        "setup-owned project hook trust state must remain intact",
+      );
+      assert.equal(
+        countMatches(
+          persistedProjectConfig,
+          new RegExp(`^${escapeRegExp(projectHookTrustHeader)}$`, "gm"),
+        ),
+        1,
+        "runtime trust sync must not duplicate setup-owned hook trust state",
+      );
+      assert.doesNotThrow(() => TOML.parse(persistedProjectConfig));
+
+      // 3. On a subsequent launch, the runtime mirror carries the persisted
+      //    project trust state forward — so Codex finds the workspace as
+      //    already-trusted and never re-prompts.
+      await rm(runtimeCodexHome, { recursive: true, force: true });
+      await prepareCodexHomeForLaunch(wd, "session-2470-repeat", {});
+      const nextRuntimeCodexHome = runtimeCodexHomePath(wd, "session-2470-repeat");
+      const nextRuntimeConfig = await readFile(
+        join(nextRuntimeCodexHome, "config.toml"),
+        "utf-8",
+      );
+      assert.ok(
+        nextRuntimeConfig.includes(`[projects."${wd}"]`),
+        "next launch must inherit the persisted workspace trust entry",
+      );
+      assert.equal(
+        countMatches(
+          nextRuntimeConfig,
+          new RegExp(`^${escapeRegExp(projectHookTrustHeader)}$`, "gm"),
+        ),
+        1,
+        "next runtime config must remain parseable without duplicate hook trust tables",
+      );
+      assert.doesNotThrow(() => TOML.parse(nextRuntimeConfig));
+      assert.equal(existsSync(join(nextRuntimeCodexHome, "hooks.json")), false);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs duplicate project hook trust state before relaunching project-scope Codex home (GH #2401)", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-issue-2401-relaunch-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      const projectConfigPath = join(projectCodexHome, "config.toml");
+      const projectHooksPath = join(projectCodexHome, "hooks.json");
+      const projectHookTrustHeader =
+        `[hooks.state."${projectHooksPath}:post_compact:0:0"]`;
+      const escapedProjectHookTrustHeader = escapeRegExp(projectHookTrustHeader);
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await mkdir(projectCodexHome, { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+      await writeFile(projectHooksPath, '{"hooks":{}}\n');
+      await writeFile(
+        projectConfigPath,
+        [
+          'model = "gpt-5.5"',
+          "",
+          "[features]",
+          "hooks = true",
+          "",
+          "# OMX-owned Codex hook trust state",
+          "# Trusts only setup-managed native hook wrappers.",
+          projectHookTrustHeader,
+          'trusted_hash = "sha256:setup-owned"',
+          "# End OMX-owned Codex hook trust state",
+          "",
+          "# OMX-synced Codex project trust state (from runtime CODEX_HOME)",
+          `[projects."${wd}"]`,
+          'trust_level = "trusted"',
+          "",
+          projectHookTrustHeader,
+          'trusted_hash = "sha256:setup-owned"',
+          "",
+          "# End OMX-synced Codex project trust state",
+          "",
+        ].join("\n"),
+      );
+
+      assert.throws(() => TOML.parse(readFileSync(projectConfigPath, "utf-8")));
+
+      await prepareCodexHomeForLaunch(wd, "session-relaunch", {});
+
+      const repairedProjectConfig = await readFile(projectConfigPath, "utf-8");
+      const runtimeConfig = await readFile(
+        join(runtimeCodexHomePath(wd, "session-relaunch"), "config.toml"),
+        "utf-8",
+      );
+
+      assert.doesNotThrow(() => TOML.parse(repairedProjectConfig));
+      assert.doesNotThrow(() => TOML.parse(runtimeConfig));
+      assert.equal(
+        countMatches(
+          repairedProjectConfig,
+          new RegExp(`^${escapedProjectHookTrustHeader}$`, "gm"),
+        ),
+        1,
+      );
+      assert.equal(
+        countMatches(runtimeConfig, new RegExp(`^${escapedProjectHookTrustHeader}$`, "gm")),
+        1,
+      );
+      assert.ok(runtimeConfig.includes(`[projects."${wd}"]`));
+      assert.ok(repairedProjectConfig.includes(`[projects."${wd}"]`));
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps setup-owned hook trust state targeted at the project hooks path (GH #2470)", async () => {
     const wd = await mkdtemp(join(tmpdir(), "omx-launch-runtime-hook-trust-"));
     try {
       const projectCodexHome = join(wd, ".codex");
@@ -2093,6 +2601,8 @@ describe("project launch scope helpers", () => {
         JSON.stringify({ scope: "project" }),
       );
       await writeFile(join(projectCodexHome, "hooks.json"), '{"hooks":{}}\n');
+      const projectHookTrustHeader =
+        `[hooks.state."${join(projectCodexHome, "hooks.json")}:pre_tool_use:0:0"]`;
       await writeFile(
         join(projectCodexHome, "config.toml"),
         [
@@ -2101,8 +2611,8 @@ describe("project launch scope helpers", () => {
           "",
           "# OMX-owned Codex hook trust state",
           "# Trusts only setup-managed codex-native-hook.js wrappers.",
-          `[hooks.state."${join(projectCodexHome, "hooks.json")}:pre_tool_use:0:0"]`,
-          'trusted_hash = "stale"',
+          projectHookTrustHeader,
+          'trusted_hash = "sha256:abc"',
           "# End OMX-owned Codex hook trust state",
           "",
         ].join("\n"),
@@ -2112,12 +2622,17 @@ describe("project launch scope helpers", () => {
       const runtimeCodexHome = runtimeCodexHomePath(wd, "session-trust");
       const runtimeConfig = await readFile(join(runtimeCodexHome, "config.toml"), "utf-8");
 
-      assert.match(
-        runtimeConfig,
-        new RegExp(`\\[hooks\\.state\\."${join(runtimeCodexHome, "hooks.json").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:pre_tool_use:0:0"\\]`),
+      // Runtime CODEX_HOME no longer holds a hooks.json mirror, so the trust
+      // block must continue pointing at the canonical project hooks.json path.
+      assert.equal(existsSync(join(runtimeCodexHome, "hooks.json")), false);
+      assert.ok(
+        runtimeConfig.includes(projectHookTrustHeader),
+        `expected runtime config.toml to keep ${projectHookTrustHeader}`,
       );
-      assert.doesNotMatch(runtimeConfig, /trusted_hash = "stale"/);
-      assert.doesNotMatch(runtimeConfig, new RegExp(join(projectCodexHome, "hooks.json").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.doesNotMatch(
+        runtimeConfig,
+        new RegExp(join(runtimeCodexHome, "hooks.json").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      );
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
@@ -2537,7 +3052,19 @@ describe("tmux HUD pane helpers", () => {
       "-t",
       "%leader",
       "-F",
-      "#{pane_id}\t#{pane_current_command}\t#{pane_start_command}",
+      [
+        "#{pane_id}",
+        "#{pane_current_command}",
+        "#{pane_left}",
+        "#{pane_top}",
+        "#{pane_width}",
+        "#{pane_height}",
+        "#{pane_bottom}",
+        "#{window_width}",
+        "#{window_height}",
+        "#{pane_start_command}",
+        "#{pane_current_path}",
+      ].join("\x1f"),
     ]);
   });
 
@@ -2751,13 +3278,83 @@ describe("detached tmux new-session sequencing", () => {
     assert.equal(newSession.args.some((arg) => arg === "OMX_ROOT=/tmp/boxed-runtime"), true);
     assert.equal(
       newSession.args.some((arg) => arg === "OMX_STATE_ROOT=/tmp/boxed-state-root"),
-      true,
+      false,
     );
+    assert.equal(newSession.args.some((arg) => arg === "OMX_TMUX_HUD_OWNER=1"), true);
     assert.equal(newSession.args.some((arg) => arg === "OMXBOX_ACTIVE=1"), true);
     assert.equal(
       newSession.args.some((arg) => arg === "OMX_SOURCE_CWD=/tmp/source-project"),
       true,
     );
+  });
+
+
+
+  it("buildDetachedSessionBootstrapSteps preserves OMX_STATE_ROOT identity when no root override is explicit", () => {
+    const steps = buildDetachedSessionBootstrapSteps(
+      "omx-demo",
+      "/tmp/project",
+      "'codex' '--model' 'gpt-5'",
+      "'node' '/tmp/omx.js' 'hud' '--watch'",
+      null,
+      undefined,
+      null,
+      false,
+      "sess-detached-managed",
+      undefined,
+      undefined,
+      "/tmp/state-root",
+      { OMX_STATE_ROOT: "/tmp/state-root" },
+    );
+    const newSession = steps.find((step) => step.name === "new-session");
+    assert.ok(newSession);
+    assert.equal(newSession.args.some((arg) => arg === "OMX_STATE_ROOT=/tmp/state-root"), true);
+    assert.equal(newSession.args.some((arg) => arg === "OMX_ROOT=/tmp/state-root"), false);
+  });
+
+  it("buildDetachedSessionBootstrapSteps preserves OMX_ROOT precedence over OMX_STATE_ROOT", () => {
+    const steps = buildDetachedSessionBootstrapSteps(
+      "omx-demo",
+      "/tmp/project",
+      "'codex' '--model' 'gpt-5'",
+      "'node' '/tmp/omx.js' 'hud' '--watch'",
+      null,
+      undefined,
+      null,
+      false,
+      "sess-detached-managed",
+      undefined,
+      undefined,
+      "/tmp/root-from-omx-root",
+      { OMX_STATE_ROOT: "/tmp/state-root-should-not-win" },
+    );
+    const newSession = steps.find((step) => step.name === "new-session");
+    assert.ok(newSession);
+    assert.equal(newSession.args.some((arg) => arg === "OMX_ROOT=/tmp/root-from-omx-root"), true);
+    assert.equal(newSession.args.some((arg) => arg === "OMX_STATE_ROOT=/tmp/state-root-should-not-win"), false);
+  });
+
+
+  it("buildDetachedSessionBootstrapSteps preserves OMX_TEAM_STATE_ROOT over explicit root env", () => {
+    const steps = buildDetachedSessionBootstrapSteps(
+      "omx-demo",
+      "/tmp/project",
+      "'codex' '--model' 'gpt-5'",
+      "'node' '/tmp/omx.js' 'hud' '--watch'",
+      null,
+      undefined,
+      null,
+      false,
+      "sess-detached-managed",
+      undefined,
+      undefined,
+      "/tmp/root-from-omx-root",
+      { OMX_ROOT: "/tmp/root-from-omx-root", OMX_TEAM_STATE_ROOT: "/tmp/team-state-root" },
+    );
+    const newSession = steps.find((step) => step.name === "new-session");
+    assert.ok(newSession);
+    assert.equal(newSession.args.some((arg) => arg === "OMX_TEAM_STATE_ROOT=/tmp/team-state-root"), true);
+    assert.equal(newSession.args.some((arg) => arg === "OMX_ROOT=/tmp/root-from-omx-root"), false);
   });
 
   it("serializes custom parent env for the interactive detached tmux leader without logging values in tmux args", () => {
@@ -2796,6 +3393,246 @@ describe("detached tmux new-session sequencing", () => {
     assert.doesNotMatch(envScript, /not-a-shell-name/);
   });
 
+  it("creates a repo-local omx command shim for launched Codex sessions", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-"));
+    try {
+      const shimDir = ensureOmxRuntimeCommandShim(
+        cwd,
+        "/repo/dist/cli/omx.js",
+        "/usr/local/bin/node",
+      );
+      const shimPath = omxRuntimeCommandShimPath(cwd);
+
+      assert.equal(shimDir, dirname(shimPath));
+      assert.equal(existsSync(shimPath), true);
+      assert.equal(await readFile(shimPath, "utf-8"), [
+        "#!/bin/sh",
+        `exec '/usr/local/bin/node' '/repo/dist/cli/omx.js' "$@"`,
+        "",
+      ].join("\n"));
+      assert.equal((await stat(shimPath)).mode & 0o700, 0o700);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("prepends the repo-local omx shim before global PATH entries", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-env-"));
+    try {
+      const env = prependOmxRuntimeCommandShimToEnv(
+        cwd,
+        {
+          PATH: "/opt/homebrew/bin:/usr/bin",
+          OMX_ENTRY_PATH: "/opt/homebrew/lib/node_modules/oh-my-codex/dist/cli/omx.js",
+        },
+        "/repo/dist/cli/omx.js",
+        "/usr/local/bin/node",
+      );
+      const shimDir = dirname(omxRuntimeCommandShimPath(cwd));
+
+      assert.equal(env.PATH, `${shimDir}${delimiter}/opt/homebrew/bin:/usr/bin`);
+      assert.equal(env.OMX_ENTRY_PATH, "/repo/dist/cli/omx.js");
+      assert.equal(env.OMX_STARTUP_CWD, cwd);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("executes the repo-local omx shim before a stale global omx with misleading success output", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-exec-"));
+    try {
+      const fakeGlobalBin = join(cwd, "fake-global-bin");
+      const fakeLocalBin = join(cwd, "fake local's $() ; bin");
+      await mkdir(fakeGlobalBin);
+      await mkdir(fakeLocalBin);
+      const globalMarker = join(cwd, "GLOBAL_CALLED");
+      const localMarker = join(cwd, "LOCAL_CALLED");
+      const fakeGlobalOmx = join(fakeGlobalBin, "omx");
+      const fakeNode = join(fakeLocalBin, "node runner");
+      const localOmxEntry = join(fakeLocalBin, "omx entry's $() ;.js");
+
+      await writeFile(fakeGlobalOmx, `#!/bin/sh
+printf 'global-called\\n' > "${globalMarker}"
+printf '{"success":true,"source":"global"}\\n'
+exit 0
+`);
+      await chmod(fakeGlobalOmx, 0o755);
+      await writeFile(fakeNode, `#!/bin/sh
+printf '%s\\n' "$@" > "${localMarker}"
+printf '{"success":true,"source":"local"}\\n'
+exit 0
+`);
+      await chmod(fakeNode, 0o755);
+
+      const env = prependOmxRuntimeCommandShimToEnv(
+        cwd,
+        { PATH: `${fakeGlobalBin}${delimiter}/usr/bin:/bin` },
+        localOmxEntry,
+        fakeNode,
+      );
+      const { execFileSync } = await import("node:child_process");
+      const output = execFileSync("omx", ["team", "status", "hud-check"], {
+        cwd,
+        env,
+        encoding: "utf-8",
+      });
+
+      assert.match(output, /"source":"local"/);
+      assert.equal(existsSync(globalMarker), false);
+      assert.deepEqual((await readFile(localMarker, "utf-8")).trim().split("\n"), [
+        localOmxEntry,
+        "team",
+        "status",
+        "hud-check",
+      ]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("overwrites stale runtime shim contents and permissions", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-stale-"));
+    try {
+      const shimPath = omxRuntimeCommandShimPath(cwd);
+      await mkdir(dirname(shimPath), { recursive: true });
+      await writeFile(shimPath, "#!/bin/sh\necho stale-global\n");
+      await chmod(shimPath, 0o600);
+
+      ensureOmxRuntimeCommandShim(cwd, "/repo/dist/cli/omx.js", "/usr/local/bin/node");
+
+      assert.equal(await readFile(shimPath, "utf-8"), [
+        "#!/bin/sh",
+        `exec '/usr/local/bin/node' '/repo/dist/cli/omx.js' "$@"`,
+        "",
+      ].join("\n"));
+      assert.equal((await stat(shimPath)).mode & 0o777, 0o700);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces a stale runtime shim symlink without following it", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-symlink-"));
+    try {
+      if (process.platform === "win32") return;
+      const shimPath = omxRuntimeCommandShimPath(cwd);
+      const externalTarget = join(cwd, "outside-target");
+      await mkdir(dirname(shimPath), { recursive: true });
+      await writeFile(externalTarget, "do not overwrite\n");
+      await symlink(externalTarget, shimPath);
+
+      ensureOmxRuntimeCommandShim(cwd, "/repo/dist/cli/omx.js", "/usr/local/bin/node");
+
+      assert.equal(await readFile(externalTarget, "utf-8"), "do not overwrite\n");
+      assert.equal((await lstat(shimPath)).isSymbolicLink(), false);
+      assert.match(await readFile(shimPath, "utf-8"), /\/repo\/dist\/cli\/omx\.js/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("throws when the runtime shim bin path is not a directory", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-file-"));
+    try {
+      const shimPath = omxRuntimeCommandShimPath(cwd);
+      await mkdir(dirname(dirname(shimPath)), { recursive: true });
+      await writeFile(dirname(shimPath), "not a directory\n");
+
+      assert.throws(
+        () => ensureOmxRuntimeCommandShim(cwd, "/repo/dist/cli/omx.js", "/usr/local/bin/node"),
+        /not a directory/,
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a Windows omx.cmd runtime shim with cmd batch content on win32", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-win-"));
+    try {
+      const shimDir = ensureOmxRuntimeCommandShim(
+        cwd,
+        "C:\\repo\\dist\\cli\\omx.js",
+        "C:\\Program Files\\nodejs\\node.exe",
+        "win32",
+      );
+      const shimPath = omxRuntimeCommandShimPath(cwd, "win32");
+
+      assert.equal(shimDir, dirname(shimPath));
+      assert.equal(shimPath.endsWith("omx.cmd"), true);
+      assert.equal(existsSync(shimPath), true);
+      assert.equal(await readFile(shimPath, "utf-8"), [
+        "@echo off",
+        `"C:\\Program Files\\nodejs\\node.exe" "C:\\repo\\dist\\cli\\omx.js" %*`,
+        "",
+      ].join("\r\n"));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an inherited Windows Path key when prepending the shim dir", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-winpath-"));
+    try {
+      const env = prependOmxRuntimeCommandShimToEnv(
+        cwd,
+        { Path: "C:\\Windows\\System32;C:\\Windows" },
+        "C:\\repo\\dist\\cli\\omx.js",
+        "C:\\Program Files\\nodejs\\node.exe",
+        "win32",
+      );
+      const shimDir = dirname(omxRuntimeCommandShimPath(cwd, "win32"));
+
+      assert.equal(env.Path, `${shimDir};C:\\Windows\\System32;C:\\Windows`);
+      assert.equal(env.PATH, undefined);
+      assert.equal(env.OMX_ENTRY_PATH, "C:\\repo\\dist\\cli\\omx.js");
+      assert.equal(env.OMX_STARTUP_CWD, cwd);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("collapses duplicate Windows PATH/Path variants to a single Path key", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-windup-"));
+    try {
+      const env = prependOmxRuntimeCommandShimToEnv(
+        cwd,
+        { PATH: "", Path: "C:\\Windows\\System32" },
+        "C:\\repo\\dist\\cli\\omx.js",
+        "C:\\Program Files\\nodejs\\node.exe",
+        "win32",
+      );
+      const shimDir = dirname(omxRuntimeCommandShimPath(cwd, "win32"));
+      const pathKeys = Object.keys(env).filter(
+        (key) => key.toLowerCase() === "path",
+      );
+
+      assert.deepEqual(pathKeys, ["Path"]);
+      assert.equal(env.Path, `${shimDir};C:\\Windows\\System32`);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("seeds a Windows Path entry from the shim dir when none is inherited", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-runtime-command-shim-winempty-"));
+    try {
+      const env = prependOmxRuntimeCommandShimToEnv(
+        cwd,
+        {},
+        "C:\\repo\\dist\\cli\\omx.js",
+        "C:\\Program Files\\nodejs\\node.exe",
+        "win32",
+      );
+      const shimDir = dirname(omxRuntimeCommandShimPath(cwd, "win32"));
+
+      assert.equal(env.Path, shimDir);
+      assert.equal(env.PATH, undefined);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("keeps detached tmux bootstrap bounded when no interactive parent env file is requested", () => {
     const steps = buildDetachedSessionBootstrapSteps(
       "omx-demo",
@@ -2819,11 +3656,40 @@ describe("detached tmux new-session sequencing", () => {
     assert.doesNotMatch(argsText, /fake-provider-key/);
   });
 
-  it("runCodex builds inside-tmux HUD command with OMX_SESSION_ID", async () => {
-    const source = await readFile(join(repoRoot, 'src', 'cli', 'index.ts'), 'utf-8');
+  it("runCodex cleans only same-session same-leader HUD panes before launch", async () => {
+    const source = await readFile(join(repoRoot, "src", "cli", "index.ts"), "utf8");
     assert.match(
       source,
-      /buildTmuxPaneCommand\("env",\s*\[\s*`OMX_SESSION_ID=\$\{sessionId\}`,\s*`\$\{OMX_TMUX_HUD_OWNER_ENV\}=1`,\s*"node",\s*omxBin,\s*"hud",\s*"--watch",?\s*\]\)/,
+      /const staleHudPaneIds = currentPaneId\s*\? listHudWatchPaneIdsInCurrentWindow\(currentPaneId, \{ sessionId, leaderPaneId: currentPaneId \}\)\s*: \[\];/,
+    );
+    assert.match(source, /const \[keeperHudPaneId, \.\.\.duplicateHudPaneIds\] = staleHudPaneIds;/);
+    assert.match(source, /for \(const paneId of duplicateHudPaneIds\) \{\s*killTmuxPane\(paneId\);\s*\}/);
+    assert.match(source, /if \(keeperHudPaneId\) \{\s*hudPaneId = keeperHudPaneId;/);
+    assert.doesNotMatch(
+      source,
+      /const staleHudPaneIds = listHudWatchPaneIdsInCurrentWindow\(currentPaneId, \{ leaderPaneId: currentPaneId \}\);/,
+    );
+  });
+
+  it("runCodex skips launch-time HUD cleanup when TMUX_PANE is unavailable", async () => {
+    const source = await readFile(join(repoRoot, "src", "cli", "index.ts"), "utf8");
+    assert.match(
+      source,
+      /const staleHudPaneIds = currentPaneId\s*\? listHudWatchPaneIdsInCurrentWindow\(currentPaneId, \{ sessionId, leaderPaneId: currentPaneId \}\)\s*: \[\];/,
+    );
+  });
+
+  it("runCodex builds inside-tmux HUD command through explicit runtime-root resolver", async () => {
+    const source = await readFile(join(repoRoot, 'src', 'cli', 'index.ts'), 'utf-8');
+    assert.match(source, /const hudRuntimeRoot = resolveHudRuntimeRootForLaunch\(cwd, process\.env\);/);
+    assert.match(
+      source,
+      /const hudEnvArgs = Object\.entries\(buildHudRuntimeEnv\(\{\s*sessionId,\s*leaderPaneId: currentPaneId,\s*\.\.\.hudRuntimeRoot,\s*\}\)\.env\)\.map\(\(\[key, value\]\) => `\$\{key\}=\$\{value\}`\)/,
+    );
+    assert.match(source, /if \(env\.OMX_TEAM_STATE_ROOT\?\.trim\(\)\) return 'team-env';\s*if \(env\.OMX_ROOT\?\.trim\(\) \|\| omxRootOverride\) return 'omx-root-env';\s*if \(env\.OMX_STATE_ROOT\?\.trim\(\)\) return 'omx-state-root-env';/);
+    assert.match(
+      source,
+      /buildTmuxPaneCommand\("env",\s*\[\.\.\.hudEnvArgs,\s*"node",\s*omxBin,\s*"hud",\s*"--watch"\]\)/,
     );
   });
 
@@ -2831,8 +3697,151 @@ describe("detached tmux new-session sequencing", () => {
     const source = await readFile(join(repoRoot, 'src', 'cli', 'index.ts'), 'utf-8');
     assert.match(
       source,
-      /registerHudResizeHook\(hudPaneId,\s*currentPaneId,\s*HUD_TMUX_HEIGHT_LINES\)/,
+      /registerInsideTmuxHudResizeHook\(\{\s*hudPaneId,\s*currentPaneId,\s*cwd,\s*sessionId,\s*omxRootOverride,\s*\}\)/,
     );
+    assert.match(
+      source,
+      /if \(currentPaneId\) \{\s*unregisterHudResizeHook\(currentPaneId\);\s*\}/,
+    );
+  });
+
+  it("buildInsideTmuxHudHookEnv tags hook commands with session, owner, leader, and local root", () => {
+    const env = buildInsideTmuxHudHookEnv(
+      { PATH: "/bin" },
+      "sess-a",
+      "%leader",
+      "/repo",
+    );
+
+    assert.equal(env.PATH, "/bin");
+    assert.equal(env.OMX_SESSION_ID, "sess-a");
+    assert.equal(env.OMX_TMUX_HUD_OWNER, "1");
+    assert.equal(env.OMX_TMUX_HUD_LEADER_PANE, "%leader");
+    assert.equal(env.OMX_ROOT, "/repo");
+  });
+
+  it("registerInsideTmuxHudResizeHook forwards cwd and env to hook registration", () => {
+    const calls: Array<{
+      hudPaneId: string;
+      leaderPaneId: string | undefined;
+      heightLines: number;
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+    }> = [];
+
+    const result = registerInsideTmuxHudResizeHook({
+      hudPaneId: "%hud",
+      currentPaneId: "%leader",
+      cwd: "/repo",
+      sessionId: "sess-a",
+      omxRootOverride: "/repo",
+      baseEnv: { PATH: "/bin" },
+      register: (hudPaneId, leaderPaneId, heightLines, options) => {
+        calls.push({ hudPaneId, leaderPaneId, heightLines, cwd: options?.cwd, env: options?.env });
+        return true;
+      },
+    });
+
+    assert.equal(result, true);
+    assert.deepEqual(calls, [{
+      hudPaneId: "%hud",
+      leaderPaneId: "%leader",
+      heightLines: HUD_TMUX_HEIGHT_LINES,
+      cwd: "/repo",
+      env: {
+        PATH: "/bin",
+        OMX_SESSION_ID: "sess-a",
+        OMX_TMUX_HUD_OWNER: "1",
+        OMX_TMUX_HUD_LEADER_PANE: "%leader",
+        OMX_ROOT: "/repo",
+      },
+    }]);
+    assert.equal(registerInsideTmuxHudResizeHook({
+      hudPaneId: null,
+      currentPaneId: "%leader",
+      cwd: "/repo",
+      sessionId: "sess-a",
+      register: () => {
+        throw new Error("should not register without a HUD pane");
+      },
+    }), false);
+  });
+
+  it("buildDetachedHudHookEnv preserves tmux targeting and local launcher identity", () => {
+    const env = buildDetachedHudHookEnv(
+      { PATH: "/bin" },
+      "sess-a",
+      "%leader",
+      "/tmp/tmux.sock,123,7",
+      "/repo/dist/cli/omx.js",
+      "/repo",
+    );
+
+    assert.equal(env.PATH, "/bin");
+    assert.equal(env.TMUX, "/tmp/tmux.sock,123,7");
+    assert.equal(env.TMUX_PANE, "%leader");
+    assert.equal(env.OMX_SESSION_ID, "sess-a");
+    assert.equal(env.OMX_TMUX_HUD_OWNER, "1");
+    assert.equal(env.OMX_ROOT, "/repo");
+    assert.equal(env.OMX_ENTRY_PATH, "/repo/dist/cli/omx.js");
+  });
+
+  it("registerDetachedHudLayoutReconcileHook reads TMUX from the detached leader pane before registering", () => {
+    const calls: Array<{
+      hudPaneId: string;
+      leaderPaneId: string | undefined;
+      heightLines: number;
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+    }> = [];
+    const readTargets: string[] = [];
+
+    const result = registerDetachedHudLayoutReconcileHook({
+      hudPaneId: "%hud",
+      detachedLeaderPaneId: "%leader",
+      cwd: "/repo",
+      sessionId: "sess-a",
+      omxBin: "/repo/dist/cli/omx.js",
+      omxRootOverride: "/repo",
+      baseEnv: { PATH: "/bin" },
+      readTmuxEnvValue: (targetPaneId) => {
+        readTargets.push(targetPaneId);
+        return "/tmp/tmux.sock,123,7";
+      },
+      register: (hudPaneId, leaderPaneId, heightLines, options) => {
+        calls.push({ hudPaneId, leaderPaneId, heightLines, cwd: options?.cwd, env: options?.env });
+        return true;
+      },
+    });
+
+    assert.equal(result, true);
+    assert.deepEqual(readTargets, ["%leader"]);
+    assert.deepEqual(calls, [{
+      hudPaneId: "%hud",
+      leaderPaneId: "%leader",
+      heightLines: HUD_TMUX_HEIGHT_LINES,
+      cwd: "/repo",
+      env: {
+        PATH: "/bin",
+        TMUX: "/tmp/tmux.sock,123,7",
+        TMUX_PANE: "%leader",
+        OMX_SESSION_ID: "sess-a",
+        OMX_TMUX_HUD_OWNER: "1",
+        OMX_ROOT: "/repo",
+        OMX_ENTRY_PATH: "/repo/dist/cli/omx.js",
+      },
+    }]);
+    assert.equal(registerDetachedHudLayoutReconcileHook({
+      hudPaneId: "%hud",
+      detachedLeaderPaneId: "%leader",
+      cwd: "/repo",
+      sessionId: "sess-a",
+      omxBin: "/repo/dist/cli/omx.js",
+      readTmuxEnvValue: () => undefined,
+      register: () => {
+        throw new Error("should not register without TMUX");
+      },
+    }), false);
   });
 
   it("buildDetachedSessionBootstrapSteps starts native Windows detached sessions with powershell", () => {
@@ -3011,6 +4020,7 @@ exit 0
         `#!/bin/sh
 printf 'codex:%s\\n' "$*" >> "${logPath}"
 printf 'codex-pwd:%s\\n' "$(pwd)" >> "${logPath}"
+printf 'codex-bridge-env:%s\\n' "\${OMX_HERMES_MCP_BRIDGE-unset}" >> "${logPath}"
 exit 0
 `,
       );
@@ -3059,6 +4069,7 @@ exit 0
           ...process.env,
           PATH: `${fakeBin}:/usr/bin:/bin`,
           HOME: cwd,
+          OMX_HERMES_MCP_BRIDGE: "1",
         },
         stdio: "ignore",
       });
@@ -3069,6 +4080,7 @@ exit 0
         normalizeDarwinTmpPath(log),
         new RegExp(`codex-pwd:${escapeRegExp(normalizeDarwinTmpPath(cwd))}`),
       );
+      assert.match(log, /codex-bridge-env:unset/);
       assert.match(log, /tmux:display-message -p #\{socket_path\}/);
       assert.match(log, /tmux:show-options -sv extended-keys/);
       assert.match(log, /tmux:set-option -sq extended-keys always/);
@@ -3883,6 +4895,9 @@ exit 0
       "%12",
       "3",
       true,
+      false,
+      true,
+      "%leader",
     );
     const names = steps.map((step) => step.name);
     const attachedIndex = names.indexOf("register-client-attached-reconcile");
@@ -3894,6 +4909,50 @@ exit 0
     assert.equal(attachIndex > scheduleIndex, true);
     assert.equal(names.includes("register-resize-hook"), true);
     assert.equal(names.includes("reconcile-hud-resize"), true);
+    assert.equal(DETACHED_TMUX_HISTORY_LIMIT, 500);
+    const historyHook = steps.find((step) => step.name === "register-detached-history-prune-hook");
+    assert.ok(historyHook);
+    assert.deepEqual(historyHook.args.slice(0, 3), ["set-hook", "-t", "omx-demo"]);
+    assert.match(historyHook.args[3] || "", /^client-detached\[[0-9]+\]$/);
+    assert.equal(
+      historyHook.args[4],
+      `if-shell -F '#{==:#{session_attached},0}' 'run-shell -b "tmux clear-history -t %leader >/dev/null 2>&1 || true"'`,
+    );
+  });
+
+  it("detached history prune hook tolerates a dead leader pane", () => {
+    const steps = buildDetachedSessionFinalizeSteps(
+      "omx-demo",
+      "%12",
+      "3",
+      true,
+      false,
+      true,
+      "%leader",
+    );
+    const historyHook = steps.find((step) => step.name === "register-detached-history-prune-hook");
+    assert.ok(historyHook);
+    const hookCommand = historyHook.args[4] || "";
+    assert.match(hookCommand, /run-shell -b/);
+    assert.match(hookCommand, />\/dev\/null 2>&1 \|\| true/);
+  });
+
+  it("buildDetachedSessionFinalizeSteps skips attach for Hermes MCP bridge launches", () => {
+    assert.equal(shouldAttachDetachedTmuxSession({ OMX_HERMES_MCP_BRIDGE: "1" }), false);
+    assert.equal(shouldAttachDetachedTmuxSession({}), true);
+
+    const steps = buildDetachedSessionFinalizeSteps(
+      "omx-demo",
+      "%12",
+      "3",
+      true,
+      false,
+      shouldAttachDetachedTmuxSession({ OMX_HERMES_MCP_BRIDGE: "1" }),
+    );
+
+    assert.equal(steps.some((step) => step.name === "attach-session"), false);
+    assert.equal(steps.some((step) => step.name === "register-resize-hook"), true);
+    assert.equal(steps.some((step) => step.name === "set-mouse"), true);
   });
 
   it("buildDetachedSessionFinalizeSteps uses quiet best-effort tmux resize commands", () => {
@@ -3913,9 +4972,9 @@ exit 0
       (step) => step.name === "reconcile-hud-resize",
     );
 
-    assert.match(registerHook?.args[5] ?? "", />\/dev\/null 2>&1 \|\| true/);
+    assert.match(registerHook?.args[4] ?? "", />\/dev\/null 2>&1 \|\| true/);
     assert.match(
-      registerHook?.args[5] ?? "",
+      registerHook?.args[4] ?? "",
       new RegExp(`-y ${HUD_TMUX_HEIGHT_LINES}\\b`),
     );
     assert.match(schedule?.args[2] ?? "", />\/dev\/null 2>&1 \|\| true/);
@@ -4003,7 +5062,8 @@ exit 0
     assert.equal(steps[0]?.args[2], "-t");
     assert.equal(steps[0]?.args[3], "omx-demo:0");
     assert.match(steps[0]?.args[4] ?? "", /^client-attached\[\d+\]$/);
-    assert.match(steps[1]?.args[5] ?? "", /^window-resized\[\d+\]$/);
+    assert.match(steps[1]?.args[4] ?? "", /^client-resized\[\d+\]$/);
+    assert.doesNotMatch(steps[1]?.args.join(" ") ?? "", /window-resized/);
     assert.deepEqual(steps[2]?.args, ["kill-session", "-t", "omx-demo"]);
   });
 
@@ -4508,5 +5568,39 @@ describe("upsertTopLevelTomlString", () => {
       updated,
       'model_reasoning_effort = "xhigh"\n[tui]\nstatus_line = []\n',
     );
+  });
+});
+
+describe("isExistingTmuxWindowTooCrampedForLaunchHud (#2754)", () => {
+  it("skips the launch-time HUD split for cramped existing tmux windows", () => {
+    // The reported repro: a 160x41 existing tmux window where forcing the HUD
+    // split dropped the Codex TUI to 38 rows and became unreadable.
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(41), true);
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(38), true);
+    assert.equal(
+      isExistingTmuxWindowTooCrampedForLaunchHud(HUD_TMUX_MIN_LAUNCH_WINDOW_HEIGHT_LINES - 1),
+      true,
+    );
+  });
+
+  it("keeps default HUD behavior for normal-height existing tmux windows", () => {
+    assert.equal(
+      isExistingTmuxWindowTooCrampedForLaunchHud(HUD_TMUX_MIN_LAUNCH_WINDOW_HEIGHT_LINES),
+      false,
+    );
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(50), false);
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(120), false);
+  });
+
+  it("creates the HUD when the window height is unknown or invalid", () => {
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(null), false);
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(undefined), false);
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(0), false);
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(Number.NaN), false);
+  });
+
+  it("honors an explicit minimum-height override", () => {
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(41, 40), false);
+    assert.equal(isExistingTmuxWindowTooCrampedForLaunchHud(39, 40), true);
   });
 });

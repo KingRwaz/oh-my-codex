@@ -22,7 +22,10 @@ import {
   getWorkerPanePid,
   teardownWorkerPanes,
   buildWorkerStartupCommand,
+  trustWorkerMiseConfigIfAvailable,
+  writeWorkerStartupScriptCommand,
   resolveTeamWorkerCliPlan,
+  tagPaneTeamOwner,
 } from './tmux-session.js';
 import { execFileSync, spawnSync } from 'child_process';
 import {
@@ -467,7 +470,17 @@ export async function scaleUp(
         }
         extraEnv.OMX_TEAM_WORKTREE_DETACHED = workerWorkspace.detached ? '1' : '0';
       }
-      const cmd = buildWorkerStartupCommand(
+      trustWorkerMiseConfigIfAvailable(workerCwd);
+      const cmd = writeWorkerStartupScriptCommand(
+        sanitized,
+        workerIndex,
+        workerLaunchArgs,
+        workerCwd,
+        extraEnv,
+        workerCliPlan[i],
+        undefined,
+        runtimeRole,
+      ) ?? buildWorkerStartupCommand(
         sanitized,
         workerIndex,
         workerLaunchArgs,
@@ -504,6 +517,16 @@ export async function scaleUp(
           workerName,
           worktreePath: workerWorkspace?.worktreePath,
         });
+      }
+      if (config.tmux_pane_owner_id) {
+        try {
+          tagPaneTeamOwner(paneId, config.tmux_pane_owner_id);
+        } catch (error) {
+          return await rollbackScaleUp(
+            `Failed to tag tmux pane for ${workerName}: ${error instanceof Error ? error.message : String(error)}`,
+            { paneId, workerName, worktreePath: workerWorkspace?.worktreePath },
+          );
+        }
       }
 
       // Intentionally avoid forcing `select-layout tiled` here.

@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { questionCommand } from '../question.js';
+import { AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV } from '../../question/autopilot-wait.js';
 import { markQuestionAnswered, readQuestionRecord } from '../../question/state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -144,6 +145,218 @@ describe('omx question CLI', () => {
     assert.equal(payload.prompt.type, 'multi-answerable');
   });
 
+  it('bridges active autopilot deep-interview questions into waiting-for-user state until answered', async () => {
+    const cwd = await makeRepo();
+    const sessionDir = join(cwd, '.omx', 'state', 'sessions', 'sess-q');
+    const autopilotPath = join(sessionDir, 'autopilot-state.json');
+    await writeFile(autopilotPath, JSON.stringify({
+      mode: 'autopilot',
+      active: true,
+      current_phase: 'deep-interview',
+      run_outcome: 'interviewing',
+      lifecycle_outcome: 'running',
+      session_id: 'sess-q',
+    }, null, 2));
+    await writeFile(join(sessionDir, 'deep-interview-state.json'), JSON.stringify({
+      mode: 'deep-interview',
+      active: true,
+      current_phase: 'intent-first',
+      session_id: 'sess-q',
+    }, null, 2));
+    await writeFile(join(sessionDir, 'skill-active-state.json'), JSON.stringify({
+      active: true,
+      skill: 'autopilot',
+      phase: 'deep-interview',
+      session_id: 'sess-q',
+      active_skills: [{ skill: 'autopilot', phase: 'deep-interview', active: true, session_id: 'sess-q' }],
+    }, null, 2));
+
+    const input = JSON.stringify({
+      question: 'Which provenance rule?',
+      options: [{ label: 'Exact page mapping', value: 'exact-page' }],
+      allow_other: false,
+      source: 'deep-interview',
+      session_id: 'sess-q',
+    });
+
+    const child = spawn(process.execPath, [omxBin, 'question', '--input', input, '--json'], {
+      cwd,
+      env: makeQuestionCliEnv(cwd, {
+        OMX_AUTO_UPDATE: '0',
+        OMX_NOTIFY_FALLBACK: '0',
+        OMX_HOOK_DERIVED_SIGNALS: '0',
+        OMX_QUESTION_TEST_RENDERER: 'noop',
+      }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    const closePromise = new Promise<number | null>((resolve) => child.on('close', resolve));
+
+    const questionsDir = join(sessionDir, 'questions');
+    const recordFile = await waitForQuestionRecordFile(questionsDir, () => `stderr=${stderr}; stdout=${stdout}`);
+    const recordPath = join(questionsDir, recordFile);
+
+    let record = null;
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      record = await readQuestionRecord(recordPath);
+      if (record?.status === 'prompting') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(record?.status, 'prompting', `expected prompting question record, stderr=${stderr}`);
+
+    const waitingAutopilot = JSON.parse(await readFile(autopilotPath, 'utf-8')) as {
+      current_phase?: string;
+      run_outcome?: string;
+      lifecycle_outcome?: string;
+      state?: { deep_interview_question?: { status?: string; previous_phase?: string } };
+    };
+    assert.equal(waitingAutopilot.current_phase, 'waiting-for-user');
+    assert.equal(waitingAutopilot.run_outcome, 'blocked_on_user');
+    assert.equal(waitingAutopilot.lifecycle_outcome, 'askuserQuestion');
+    assert.equal(waitingAutopilot.state?.deep_interview_question?.status, 'waiting_for_user');
+    assert.equal(waitingAutopilot.state?.deep_interview_question?.previous_phase, 'deep-interview');
+
+    await markQuestionAnswered(recordPath, {
+      kind: 'option',
+      value: 'exact-page',
+      selected_labels: ['Exact page mapping'],
+      selected_values: ['exact-page'],
+    });
+
+    const exitCode = await closePromise;
+    assert.equal(exitCode, 0, stderr || stdout);
+
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.answer.value, 'exact-page');
+
+    const finalAutopilot = JSON.parse(await readFile(autopilotPath, 'utf-8')) as {
+      current_phase?: string;
+      run_outcome?: string;
+      lifecycle_outcome?: string;
+      state?: { deep_interview_question?: { status?: string; question_id?: string; satisfied_at?: string } };
+    };
+    assert.equal(finalAutopilot.current_phase, 'deep-interview');
+    assert.equal(finalAutopilot.run_outcome, 'interviewing');
+    assert.equal(finalAutopilot.lifecycle_outcome, 'running');
+    assert.equal(finalAutopilot.state?.deep_interview_question?.status, 'satisfied');
+    assert.equal(finalAutopilot.state?.deep_interview_question?.question_id, record?.question_id);
+    assert.ok(finalAutopilot.state?.deep_interview_question?.satisfied_at);
+  });
+
+  it('allows the owning spawned deep-interview question after Autopilot records the wait', async () => {
+    const cwd = await makeRepo();
+    const sessionDir = join(cwd, '.omx', 'state', 'sessions', 'sess-q');
+    const questionsDir = join(sessionDir, 'questions');
+    const autopilotPath = join(sessionDir, 'autopilot-state.json');
+    const obligationId = 'obligation-owner';
+    await writeFile(autopilotPath, JSON.stringify({
+      mode: 'autopilot',
+      active: true,
+      current_phase: 'waiting-for-user',
+      run_outcome: 'blocked_on_user',
+      lifecycle_outcome: 'askuserQuestion',
+      session_id: 'sess-q',
+      state: {
+        deep_interview_question: {
+          status: 'waiting_for_user',
+          source: 'omx-question',
+          obligation_id: obligationId,
+          previous_phase: 'deep-interview',
+          previous_run_outcome: 'interviewing',
+          previous_lifecycle_outcome: 'running',
+          requested_at: '2026-04-19T00:00:00.000Z',
+        },
+      },
+    }, null, 2));
+    await writeFile(join(sessionDir, 'deep-interview-state.json'), JSON.stringify({
+      mode: 'deep-interview',
+      active: false,
+      current_phase: 'intent-first',
+      session_id: 'sess-q',
+      question_enforcement: {
+        obligation_id: obligationId,
+        source: 'omx-question',
+        status: 'pending',
+        lifecycle_outcome: 'askuserQuestion',
+        requested_at: '2026-04-19T00:00:00.000Z',
+      },
+    }, null, 2));
+    await writeFile(join(sessionDir, 'skill-active-state.json'), JSON.stringify({
+      active: true,
+      skill: 'autopilot',
+      phase: 'deep-interview',
+      session_id: 'sess-q',
+      active_skills: [{ skill: 'autopilot', phase: 'deep-interview', active: true, session_id: 'sess-q' }],
+    }, null, 2));
+
+    const input = JSON.stringify({
+      question: 'Which filename policy?',
+      options: [{ label: 'Lowercase kebab', value: 'kebab' }],
+      allow_other: false,
+      source: 'deep-interview',
+      session_id: 'sess-q',
+    });
+
+    const child = spawn(process.execPath, [omxBin, 'question', '--input', input, '--json'], {
+      cwd,
+      env: makeQuestionCliEnv(cwd, {
+        OMX_AUTO_UPDATE: '0',
+        OMX_NOTIFY_FALLBACK: '0',
+        OMX_HOOK_DERIVED_SIGNALS: '0',
+        OMX_QUESTION_TEST_RENDERER: 'noop',
+        [AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV]: obligationId,
+      }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    const closePromise = new Promise<number | null>((resolve) => child.on('close', resolve));
+
+    const recordFile = await waitForQuestionRecordFile(questionsDir, () => `stderr=${stderr}; stdout=${stdout}`);
+    const recordPath = join(questionsDir, recordFile);
+    let record = null;
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      record = await readQuestionRecord(recordPath);
+      if (record?.status === 'prompting') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(record?.status, 'prompting', `expected owner question to prompt, stderr=${stderr}; stdout=${stdout}`);
+
+    await markQuestionAnswered(recordPath, {
+      kind: 'option',
+      value: 'kebab',
+      selected_labels: ['Lowercase kebab'],
+      selected_values: ['kebab'],
+    });
+
+    const exitCode = await closePromise;
+    assert.equal(exitCode, 0, stderr || stdout);
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.answer.value, 'kebab');
+
+    const finalAutopilot = JSON.parse(await readFile(autopilotPath, 'utf-8')) as {
+      current_phase?: string;
+      run_outcome?: string;
+      lifecycle_outcome?: string;
+      state?: { deep_interview_question?: { status?: string; obligation_id?: string; question_id?: string } };
+    };
+    assert.equal(finalAutopilot.current_phase, 'deep-interview');
+    assert.equal(finalAutopilot.run_outcome, 'interviewing');
+    assert.equal(finalAutopilot.lifecycle_outcome, 'running');
+    assert.equal(finalAutopilot.state?.deep_interview_question?.status, 'satisfied');
+    assert.equal(finalAutopilot.state?.deep_interview_question?.obligation_id, obligationId);
+    assert.equal(finalAutopilot.state?.deep_interview_question?.question_id, record?.question_id);
+  });
+
   it('omits legacy prompt and answer projections for batch payloads', async () => {
     const cwd = await makeRepo();
     const input = JSON.stringify({
@@ -211,11 +424,14 @@ case "$1" in
     printf '%%0\\t1\\n%%2\\t0\\n'
     ;;
   display-message)
-    if [ "$2" = "-p" ] && [ "$3" = "-t" ] && [ "$4" = "%0" ] && [ "$5" = "#{session_attached}" ]; then
-      printf '1\n'
-      exit 0
-    fi
-    printf '%%0\n'
+    for format do :; done
+    case "$format" in
+      '#{session_attached}') printf '1\n' ;;
+      '#{pane_width}') printf '80\n' ;;
+      '#{pane_height}') printf '40\n' ;;
+      '#{session_id}'|'#{window_id}') printf '\n' ;;
+      *) printf '%%0\n' ;;
+    esac
     ;;
 esac
 `, { mode: 0o755 });
@@ -274,7 +490,14 @@ esac
 printf '%s\n' "$*" >> "${tmuxLogPath}"
 case "$1" in
   display-message)
-    printf '1\n'
+    for format do :; done
+    case "$format" in
+      '#{session_attached}') printf '1\n' ;;
+      '#{pane_width}') printf '80\n' ;;
+      '#{pane_height}') printf '40\n' ;;
+      '#{session_id}'|'#{window_id}') printf '\n' ;;
+      *) printf '1\n' ;;
+    esac
     ;;
   split-window)
     printf '%%45\n'
@@ -651,9 +874,16 @@ esac
         '--json',
       ]);
 
-      setTimeout(() => {
-        process.stdin.emit('keypress', '', { name: 'enter' });
-      }, 25);
+      const waitForInlineFrame = async (pattern: RegExp, label: string) => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          if (pattern.test(stderrWrites.join(''))) return;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error(`Timed out waiting for ${label}; stderr=${stderrWrites.join('')}`);
+      };
+
+      await waitForInlineFrame(/↑↓ move · Enter select/, 'single-question answering frame');
+      process.stdin.emit('keypress', '', { name: 'enter' });
 
       await runPromise;
       const joined = writes.join('');
@@ -661,8 +891,8 @@ esac
       const payload = JSON.parse(joined);
       assert.equal(payload.ok, true);
       assert.equal(payload.answer.value, 'a');
-      assert.doesNotMatch(joined, /Use ↑\/↓ to move, Enter to select\./);
-      assert.match(stderrJoined, /Use ↑\/↓ to move, Enter to select\./);
+      assert.doesNotMatch(joined, /↑↓ move · Enter select/);
+      assert.match(stderrJoined, /↑↓ move · Enter select/);
 
       const entries = await readdir(join(cwd, '.omx', 'state', 'sessions', 'sess-q', 'questions'));
       assert.equal(entries.length, 1);

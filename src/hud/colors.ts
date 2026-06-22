@@ -12,6 +12,7 @@ const BOLD = '\x1b[1m';
 const RED = '\x1b[31m';
 const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
+const MAGENTA = '\x1b[35m';
 const CYAN = '\x1b[36m';
 let colorEnabled = true;
 
@@ -34,6 +35,10 @@ export function green(text: string): string {
 
 export function yellow(text: string): string {
   return wrapColor(YELLOW, text);
+}
+
+export function magenta(text: string): string {
+  return wrapColor(MAGENTA, text);
 }
 
 export function cyan(text: string): string {

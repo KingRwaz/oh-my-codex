@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { getStateFilePath, readCurrentSessionId } from '../mcp/state-paths.js';
 import {
+  OmxQuestionError,
   runOmxQuestion,
   type OmxQuestionClientOptions,
   type OmxQuestionSuccessPayload,
@@ -13,6 +14,13 @@ import {
 } from './state.js';
 import type { TerminalLifecycleOutcome } from '../runtime/terminal-lifecycle.js';
 import type { QuestionInput, QuestionRecord } from './types.js';
+import type { DownstreamAuthority } from '../state/workflow-transition.js';
+import {
+  AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV,
+  claimAutopilotDeepInterviewQuestionWaiting,
+  readAutopilotDeepInterviewQuestionWaitState,
+  resolveAutopilotDeepInterviewQuestionWaiting,
+} from './autopilot-wait.js';
 
 const DEEP_INTERVIEW_STATE_FILE = 'deep-interview-state.json';
 
@@ -32,6 +40,7 @@ interface DeepInterviewStateRecord {
   updated_at?: string;
   lifecycle_outcome?: TerminalLifecycleOutcome;
   question_enforcement?: DeepInterviewQuestionEnforcementState;
+  downstream_authority?: DownstreamAuthority;
   [key: string]: unknown;
 }
 
@@ -267,6 +276,23 @@ export async function runDeepInterviewQuestion(
   const cwd = options.cwd ?? process.cwd();
   const sessionId = safeString(input.session_id).trim() || await readCurrentSessionId(cwd);
   const obligation = createDeepInterviewQuestionObligation();
+  const existingAutopilotWait = await readAutopilotDeepInterviewQuestionWaitState(cwd, sessionId);
+
+  if (existingAutopilotWait) {
+    throw new OmxQuestionError(
+      'active_execution_mode_blocked',
+      'Autopilot already has a pending deep-interview question.',
+    );
+  }
+
+  const autopilotWaitClaim = await claimAutopilotDeepInterviewQuestionWaiting(cwd, sessionId, obligation);
+  if (autopilotWaitClaim === 'blocked') {
+    throw new OmxQuestionError(
+      'active_execution_mode_blocked',
+      'Autopilot cannot start a new deep-interview question until the existing wait claim is resolved.',
+    );
+  }
+  const autopilotWaitStarted = autopilotWaitClaim === 'started';
 
   await updateDeepInterviewQuestionEnforcement(
     cwd,
@@ -281,7 +307,15 @@ export async function runDeepInterviewQuestion(
         source: input.source ?? 'deep-interview',
         ...(sessionId ? { session_id: sessionId } : {}),
       },
-      options,
+      autopilotWaitStarted
+        ? {
+            ...options,
+            env: {
+              ...(options.env ?? process.env),
+              [AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV]: obligation.obligation_id,
+            },
+          }
+        : options,
     );
 
     await updateDeepInterviewQuestionEnforcement(
@@ -292,6 +326,13 @@ export async function runDeepInterviewQuestion(
           ? satisfyDeepInterviewQuestionObligation(current, result.question_id)
           : current
       ),
+    );
+    await resolveAutopilotDeepInterviewQuestionWaiting(
+      cwd,
+      sessionId,
+      obligation.obligation_id,
+      'satisfied',
+      { questionId: result.question_id },
     );
 
     return result;
@@ -304,6 +345,13 @@ export async function runDeepInterviewQuestion(
           ? clearDeepInterviewQuestionObligation(current, 'error')
           : current
       ),
+    );
+    await resolveAutopilotDeepInterviewQuestionWaiting(
+      cwd,
+      sessionId,
+      obligation.obligation_id,
+      'cleared',
+      { clearReason: 'error' },
     );
     throw error;
   }

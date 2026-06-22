@@ -80,7 +80,10 @@ export function resolveOmxEntryPath(
   }
 
   const fromEnv = String(env[OMX_ENTRY_PATH_ENV] ?? "").trim();
-  if (fromEnv !== "") return fromEnv;
+  if (fromEnv !== "") {
+    const startupCwd = String(env[OMX_STARTUP_CWD_ENV] ?? "").trim() || cwd;
+    return resolveLauncherPath(fromEnv, startupCwd);
+  }
 
   if (rawPath === "") return null;
 
@@ -121,9 +124,11 @@ export function rememberOmxLaunchContext(
   if (String(env[OMX_STARTUP_CWD_ENV] ?? "").trim() === "") {
     env[OMX_STARTUP_CWD_ENV] = cwd;
   }
-  if (String(env[OMX_ENTRY_PATH_ENV] ?? "").trim() !== "") return;
+  const hasExplicitArgv1 = Object.prototype.hasOwnProperty.call(options, "argv1");
+  const explicitArgv1 = typeof options.argv1 === "string" ? options.argv1.trim() : "";
+  if (String(env[OMX_ENTRY_PATH_ENV] ?? "").trim() !== "" && (!hasExplicitArgv1 || explicitArgv1 === "")) return;
 
-  const resolved = Object.prototype.hasOwnProperty.call(options, "argv1")
+  const resolved = hasExplicitArgv1
     ? resolveOmxEntryPath({
       argv1: options.argv1,
       cwd,
@@ -315,11 +320,24 @@ export function canonicalProjectMemoryPath(projectRoot?: string): string {
   return join(projectRoot || process.cwd(), "project-memory.json");
 }
 
-/** Project memory read order: repository-visible canonical file, then legacy OMX runtime memory. */
+/** CLI-compatible repository-local project memory file (.omx/project-memory.json). */
+export function repoLocalProjectMemoryPath(projectRoot?: string): string {
+  return join(projectRoot || process.cwd(), ".omx", "project-memory.json");
+}
+
+/**
+ * Project memory read order for startup context.
+ *
+ * Keep the repository-visible root file first for existing SessionStart compatibility,
+ * then include the CLI/MCP project-memory location before boxed OMX runtime memory.
+ */
 export function projectMemoryPathCandidates(projectRoot?: string): string[] {
-  const canonical = canonicalProjectMemoryPath(projectRoot);
-  const legacy = omxProjectMemoryPath(projectRoot);
-  return canonical === legacy ? [canonical] : [canonical, legacy];
+  const candidates = [
+    canonicalProjectMemoryPath(projectRoot),
+    repoLocalProjectMemoryPath(projectRoot),
+    omxProjectMemoryPath(projectRoot),
+  ];
+  return candidates.filter((path, index) => candidates.indexOf(path) === index);
 }
 
 /** First readable project memory path, preferring repository-visible canonical memory. */

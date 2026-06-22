@@ -102,12 +102,18 @@ const SKILL_PATTERNS = [
   rx('user says `continue`'),
 ];
 
+// Textual guidance contract only: these patterns prevent prompt-surface drift;
+// they do not enforce runtime harness behavior.
 const ULTRAQA_SKILL_PATTERNS = [
   ...SKILL_PATTERNS,
   rx('adversarial dynamic e2e'),
   rx('not satisfied by a shallow build/lint/typecheck/test checklist|build/lint/typecheck/test.*not sufficient'),
   rx('malicious/hostile user behavior|hostile user modeling|User/attacker model'),
   rx('temporary tests.*harnesses|temporary harnesses'),
+  rx('Use absolute repo imports[^\\n]*pathToFileURL\\(join\\(repoRoot, \"dist\", \\.\\.\\.\\)\\)\\.href[^\\n]*Never rely on[^\\n]*\\./dist'),
+  rx('Use a safe file writer[^\\n]*non-interpolating file-write mechanism[^\\n]*do not use interpolating heredocs'),
+  rx('Sanitize OMX runtime env for isolated probes[^\\n]*OMX_ROOT[^\\n]*OMX_STATE_ROOT[^\\n]*unset[^\\n]*env -u OMX_ROOT -u OMX_STATE_ROOT'),
+  rx('Classify harness setup failures separately[^\\n]*record it as harness debris[^\\n]*fix the harness[^\\n]*rerun the scenario[^\\n]*before declaring a product defect'),
   rx('malformed input'),
   rx('repeated interruptions'),
   rx('prompt injection'),
@@ -370,6 +376,17 @@ export const PROMPT_REFACTOR_INVARIANT_CONTRACTS: GuidanceSurfaceContract[] = [
       rx('review_verdict'),
       rx('qa_verdict'),
       rx('return_to_ralplan_reason'),
+      rx('ralplan_consensus_gate'),
+      rx('PRD/test-spec files alone are not completion evidence'),
+    ],
+  },
+  {
+    id: 'pipeline-ralplan-consensus-skip-gate',
+    path: 'skills/pipeline/SKILL.md',
+    requiredPatterns: [
+      rx('Skips only when both `prd-\\*\\.md` and `test-spec-\\*\\.md`'),
+      rx('Architect approval followed by Critic approval'),
+      rx('Plan/test-spec files alone are not consensus evidence'),
     ],
   },
   {

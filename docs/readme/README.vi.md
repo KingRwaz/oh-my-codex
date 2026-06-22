@@ -9,7 +9,7 @@
 [![npm version](https://img.shields.io/npm/v/oh-my-codex)](https://www.npmjs.com/package/oh-my-codex)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
-[![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/PUwSMR9XNk)
+[![Discord](https://img.shields.io/discord/1452487457085063218?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/sj4exxQ9v)
 
 **Website:** https://yeachan-heo.github.io/oh-my-codex-website/
 **Tài liệu:** [Bắt đầu](../getting-started.html) · [Agent](../agents.html) · [Skill](../skills.html) · [Tích hợp](../integrations.html) · [Demo](../../DEMO.md) · [Hướng dẫn OpenClaw](../openclaw-integration.md)
@@ -152,15 +152,14 @@ omx team shutdown <team-name>
 - `omx doctor` kiểm tra cài đặt khi có vấn đề
 - `omx hud --watch` theo dõi trạng thái, không phải workflow chính
 
-### Explore và sparkshell
+### Sparkshell
 
-- `omx explore --prompt "..."` tìm kiếm chỉ đọc trong repository
 - `omx sparkshell <command>` chạy lệnh shell có kiểm soát output
+- để tìm kiếm chỉ đọc trong repository, hãy dùng các công cụ/subagent kiểm tra repository thông thường của Codex (lệnh `omx explore` đã lỗi thời và bị gỡ bỏ)
 
 Ví dụ:
 
 ```bash
-omx explore --prompt "find where team state is written"
 omx sparkshell git status
 omx sparkshell --tmux-pane %12 --tail-lines 400
 ```

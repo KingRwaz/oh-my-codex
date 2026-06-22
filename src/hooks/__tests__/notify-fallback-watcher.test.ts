@@ -261,6 +261,31 @@ if [[ "$cmd" == "display-message" ]]; then
   fi
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   sendKeysArgs="$*"
   if [[ "${options.failSendKeys === true ? '1' : '0'}" == "1" ]]; then
@@ -394,6 +419,31 @@ fi
 if [[ "$cmd" == "capture-pane" ]]; then
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -449,8 +499,36 @@ describe('notify-fallback watcher', () => {
       const staleIso = new Date(Date.now() - 60_000).toISOString();
       const freshIso = new Date(Date.now() + 2_000).toISOString();
       const threadId = `thread-${sid}`;
+      const leaderThreadId = `leader-${sid}`;
       const staleTurn = `turn-stale-${sid}`;
       const freshTurn = `turn-fresh-${sid}`;
+      await writeFile(join(wd, '.omx', 'state', 'session.json'), JSON.stringify({ session_id: sid }));
+      await writeFile(join(wd, '.omx', 'state', 'subagent-tracking.json'), JSON.stringify({
+        schemaVersion: 1,
+        sessions: {
+          [sid]: {
+            session_id: sid,
+            leader_thread_id: leaderThreadId,
+            updated_at: staleIso,
+            threads: {
+              [leaderThreadId]: {
+                thread_id: leaderThreadId,
+                kind: 'leader',
+                first_seen_at: staleIso,
+                last_seen_at: staleIso,
+                turn_count: 1,
+              },
+              [threadId]: {
+                thread_id: threadId,
+                kind: 'subagent',
+                first_seen_at: staleIso,
+                last_seen_at: staleIso,
+                turn_count: 1,
+              },
+            },
+          },
+        },
+      }));
 
       const lines = [
         {
@@ -497,6 +575,12 @@ describe('notify-fallback watcher', () => {
       const fallbackLog = join(wd, '.omx', 'logs', `notify-fallback-${new Date().toISOString().split('T')[0]}.jsonl`);
       const fallbackEntries = await readJsonLines(fallbackLog);
       assert.deepEqual(fallbackEntries.map((entry) => entry.type), ['fallback_notify']);
+
+      const tracking = JSON.parse(await readFile(join(wd, '.omx', 'state', 'subagent-tracking.json'), 'utf-8'));
+      const completedThread = tracking.sessions?.[sid]?.threads?.[threadId];
+      assert.equal(completedThread?.completed_at ? true : false, true);
+      assert.equal(completedThread?.last_completed_turn_id, freshTurn);
+      assert.equal(completedThread?.completion_source, 'notify-fallback-watcher');
     } finally {
       await rm(wd, { recursive: true, force: true });
       await rm(tempHome, { recursive: true, force: true });
@@ -1468,6 +1552,31 @@ if [[ "$cmd" == "display-message" ]]; then
     echo "omx-team-dispatch-team"
     exit 0
   fi
+  exit 0
+fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
   exit 0
 fi
 if [[ "$cmd" == "send-keys" ]]; then
@@ -2657,6 +2766,31 @@ fi
 if [[ "$cmd" == "capture-pane" ]]; then
   exit 0
 fi
+if [[ "$cmd" == "set-buffer" ]]; then
+  printf '%s' "\${@: -1}" > "${tmuxLogPath}.buffer"
+  exit 0
+fi
+if [[ "$cmd" == "show-buffer" ]]; then
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then cat "${tmuxLogPath}.buffer"; fi
+  exit 0
+fi
+if [[ "$cmd" == "paste-buffer" ]]; then
+  target=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -t) target="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -f "${tmuxLogPath}.buffer" ]]; then
+    echo "send-keys -t \${target} -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
+  fi
+  exit 0
+fi
+if [[ "$cmd" == "delete-buffer" ]]; then
+  rm -f "${tmuxLogPath}.buffer"
+  exit 0
+fi
 if [[ "$cmd" == "send-keys" ]]; then
   exit 0
 fi
@@ -3531,6 +3665,79 @@ exit 0
         child.kill('SIGTERM');
         await waitForExit(child, 4000).catch(() => {});
       }
+      await rm(wd, { recursive: true, force: true });
+      await rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('prints notify script missing errors to stderr for authority-only ticks', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-authority-missing-script-'));
+    const tempHome = await mkdtemp(join(tmpdir(), 'omx-fallback-authority-missing-home-'));
+    const watcherScript = new URL('../../../dist/scripts/notify-fallback-watcher.js', import.meta.url).pathname;
+    const missingNotifyHook = join(wd, 'dist', 'scripts', 'missing-notify-hook.js');
+    try {
+      const run = spawnSync(
+        process.execPath,
+        [
+          watcherScript,
+          '--once',
+          '--authority-only',
+          '--cwd',
+          wd,
+          '--notify-script',
+          missingNotifyHook,
+          '--poll-ms',
+          '50',
+        ],
+        {
+          cwd: wd,
+          encoding: 'utf-8',
+          env: buildCleanNotifyEnv({ HOME: tempHome }),
+        },
+      );
+
+      assert.equal(run.status, 1);
+      assert.match(run.stderr, /notify-fallback-watcher: notify script missing:/);
+      assert.match(run.stderr, /missing-notify-hook\.js/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+      await rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('prints fatal watcher errors to stderr for authority-only ticks', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-authority-fatal-'));
+    const tempHome = await mkdtemp(join(tmpdir(), 'omx-fallback-authority-fatal-home-'));
+    const watcherScript = new URL('../../../dist/scripts/notify-fallback-watcher.js', import.meta.url).pathname;
+    const notifyHook = new URL('../../../dist/scripts/notify-hook.js', import.meta.url).pathname;
+    try {
+      const run = spawnSync(
+        process.execPath,
+        [
+          watcherScript,
+          '--once',
+          '--authority-only',
+          '--cwd',
+          wd,
+          '--notify-script',
+          notifyHook,
+          '--poll-ms',
+          '50',
+        ],
+        {
+          cwd: wd,
+          encoding: 'utf-8',
+          env: buildCleanNotifyEnv({
+            HOME: tempHome,
+            NODE_ENV: 'test',
+            OMX_NOTIFY_FALLBACK_TEST_FATAL: '1',
+          }),
+        },
+      );
+
+      assert.equal(run.status, 1);
+      assert.match(run.stderr, /notify-fallback-watcher: fatal: test fatal notify fallback failure/);
+    } finally {
       await rm(wd, { recursive: true, force: true });
       await rm(tempHome, { recursive: true, force: true });
     }
@@ -4475,7 +4682,7 @@ exit 0
   it('keeps the detached helper alive after the hidden bootstrap exits', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-bootstrap-survival-'));
     const readyPath = join(wd, 'helper-ready.json');
-    const helperScriptPath = join(wd, 'helper-survival.js');
+    const helperScriptPath = join(wd, 'helper-survival.cjs');
 
     try {
       await writeFile(helperScriptPath, `

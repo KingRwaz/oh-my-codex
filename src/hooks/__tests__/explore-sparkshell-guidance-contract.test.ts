@@ -10,38 +10,37 @@ function expectPatterns(path: string, patterns: RegExp[]): void {
 }
 
 describe('explore + sparkshell guidance contract', () => {
-  it('keeps AGENTS root and template aligned on conditional explore routing and opt-in sparkshell guidance', () => {
-    const patterns = [
-      /USE_OMX_EXPLORE_CMD/i,
-      /SHOULD treat `omx explore`|strongly prefer `omx explore`/i,
-      /--prompt/i,
-      /shell-only, allowlisted, read-only path|shell-only allowlisted read-only path/i,
-      /gracefully fall back to the normal path/i,
+  it('keeps AGENTS root and template aligned on supported repository-lookup routing and opt-in sparkshell guidance without the removed explore command', () => {
+    const requiredPatterns = [
+      /normal Codex repository inspection/i,
       /omx sparkshell --tmux-pane/i,
       /explicit opt-?in/i,
       /When to use what/i,
     ];
 
     for (const surface of listTrackedAgentSurfaces()) {
-      expectPatterns(surface, patterns);
+      const content = loadSurface(surface);
+      expectPatterns(surface, requiredPatterns);
+      assert.doesNotMatch(content, /omx explore/i, `${surface} still references the removed omx explore command`);
+      assert.doesNotMatch(content, /USE_OMX_EXPLORE_CMD/i, `${surface} still references the deprecated USE_OMX_EXPLORE_CMD override`);
     }
   });
 
   it('keeps explore surfaces explicit about richer-path fallback', () => {
     expectPatterns('prompts/explore.md', [
-      /USE_OMX_EXPLORE_CMD/i,
-      /preferred low-cost path/i,
-      /continue on this richer normal path/i,
+      /`omx explore --prompt \.\.\.` is deprecated/i,
+      /compatibility-only/i,
+      /richer normal path/i,
     ]);
 
     expectPatterns('prompts/explore-harness.md', [
       /simple read-only repository lookup tasks/i,
-      /Prefer `omx explore --prompt/i,
-      /fall back to the richer normal path/i,
+      /deprecated and compatibility-only/i,
+      /richer normal path/i,
     ]);
   });
 
-  it('keeps execution and planning surfaces conditional on explore routing', () => {
+  it('keeps execution and planning surfaces explicit about deprecated explore routing', () => {
     for (const surface of [
       'prompts/planner.md',
       'prompts/executor.md',
@@ -50,12 +49,11 @@ describe('explore + sparkshell guidance contract', () => {
       'skills/plan/SKILL.md',
       'skills/ralplan/SKILL.md',
       'skills/ralph/SKILL.md',
-      'skills/team/SKILL.md',
     ]) {
       expectPatterns(surface, [
-        /USE_OMX_EXPLORE_CMD/i,
-        /prefer `omx explore`|use `omx explore` FIRST/i,
-        /fall back normally|fallback normally|graceful fallback|richer normal explore path/i,
+        /`omx explore` is deprecated/i,
+        /normal repository inspection|normal Codex repository inspection/i,
+        /omx sparkshell/i,
       ]);
     }
   });

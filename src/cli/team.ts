@@ -39,6 +39,7 @@ import {
 } from '../team/approved-execution.js';
 import {
   buildUltragoalCheckpointGuidance,
+  reconcilePersistedTeamUltragoalContext,
   readPersistedTeamUltragoalContext,
   renderUltragoalCheckpointGuidanceText,
 } from '../team/ultragoal-context.js';
@@ -975,6 +976,10 @@ interface DecompositionPlan {
 export interface TeamExecutionPlan {
   workerCount: number;
   tasks: Array<{ subject: string; description: string; owner: string; role?: string }>;
+  overOrchestrationNotice?: {
+    code: 'team_over_orchestration_warning' | 'explicit_team_override_acknowledged';
+    message: string;
+  };
 }
 
 function resolveImplicitTeamFallbackRole(agentType: string, explicitAgentType: boolean): string {
@@ -1031,6 +1036,7 @@ export function buildTeamExecutionPlan(
   explicitWorkerCount = false,
 ): TeamExecutionPlan {
   const plan = splitTaskString(task);
+  const taskSize = classifyTaskSize(task).size;
   const effectiveWorkerCount = resolveTeamFanoutLimit(
     task,
     workerCount,
@@ -1039,6 +1045,19 @@ export function buildTeamExecutionPlan(
     plan,
   );
   const fallbackRole = resolveImplicitTeamFallbackRole(agentType, explicitAgentType);
+  const overOrchestrationNotice = plan.strategy === 'atomic' && taskSize === 'small'
+    ? explicitWorkerCount && workerCount > 1
+      ? {
+        code: 'explicit_team_override_acknowledged' as const,
+        message: 'Small atomic task is using Team fanout because the worker count was explicit.',
+      }
+      : workerCount > 1 && effectiveWorkerCount === 1
+        ? {
+          code: 'team_over_orchestration_warning' as const,
+          message: 'Small atomic task is capped to one Team worker; consider a solo execution path for lower overhead.',
+        }
+        : undefined
+    : undefined;
 
   let subtasks = plan.subtasks;
   const usedAspectSubtasks = subtasks.length <= 1 && effectiveWorkerCount > 1;
@@ -1069,6 +1088,7 @@ export function buildTeamExecutionPlan(
   return {
     workerCount: effectiveWorkerCount,
     tasks,
+    ...(overOrchestrationNotice ? { overOrchestrationNotice } : {}),
   };
 }
 
@@ -1482,9 +1502,27 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
       config?.leader_cwd ?? cwd,
       config?.team_state_root ?? undefined,
     );
-    const ultragoalCheckpointGuidance = ultragoalContext
-      ? buildUltragoalCheckpointGuidance(ultragoalContext)
+    const ultragoalReconciliation = await reconcilePersistedTeamUltragoalContext(
+      config?.leader_cwd ?? cwd,
+      ultragoalContext,
+    );
+    const currentUltragoalContext = ultragoalReconciliation.status === 'valid'
+      ? ultragoalReconciliation.context
       : null;
+    const ultragoalCheckpointGuidance = currentUltragoalContext
+      ? buildUltragoalCheckpointGuidance(currentUltragoalContext)
+      : null;
+    const ultragoalContextWarning = ultragoalReconciliation.warning
+      ? {
+        status: ultragoalReconciliation.status,
+        message: ultragoalReconciliation.warning.message,
+      }
+      : ultragoalContext
+        ? {
+          status: ultragoalReconciliation.status,
+          message: `Persisted Ultragoal context is not currently valid (${ultragoalReconciliation.status}); checkpoint guidance suppressed.`,
+        }
+        : null;
     if (wantsJson) {
       console.log(JSON.stringify({
         ...buildJsonBase(),
@@ -1511,6 +1549,9 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
         },
         performance: snapshot.performance ?? null,
         panes: paneStatus,
+        ...(ultragoalContextWarning
+          ? { ultragoal_context_warning: ultragoalContextWarning }
+          : {}),
         ...(ultragoalCheckpointGuidance
           ? { ultragoal_checkpoint_guidance: ultragoalCheckpointGuidance }
           : {}),
@@ -1534,7 +1575,10 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
         `monitor_perf_ms: total=${snapshot.performance.total_ms} list=${snapshot.performance.list_tasks_ms} workers=${snapshot.performance.worker_scan_ms} mailbox=${snapshot.performance.mailbox_delivery_ms}`
       );
     }
-    for (const line of renderUltragoalCheckpointGuidanceText(ultragoalContext)) {
+    if (ultragoalContextWarning) {
+      console.log(`ultragoal_context_warning: ${ultragoalContextWarning.message}`);
+    }
+    for (const line of renderUltragoalCheckpointGuidanceText(currentUltragoalContext)) {
       console.log(line);
     }
     renderTeamPaneStatus(paneStatus, modelInspect, tailLines);
@@ -1722,5 +1766,8 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
   );
 
   await ensureTeamModeState({ ...effectiveParsed, teamName: runtime.teamName, displayName: runtime.config.display_name ?? effectiveParsed.displayName }, tasks);
+  if (executionPlan.overOrchestrationNotice) {
+    console.log(`${executionPlan.overOrchestrationNotice.code}: ${executionPlan.overOrchestrationNotice.message}`);
+  }
   await renderStartSummary(runtime, staffingPlan);
 }
